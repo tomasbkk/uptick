@@ -1,0 +1,187 @@
+#include "uptick.h"
+#include <LittleFS.h>
+#include <ArduinoJson.h>
+
+static const char* CFG_PATH = "/config.json";
+
+Config g_cfg;
+SemaphoreHandle_t g_cfgMutex = nullptr;
+volatile uint32_t g_cfgRev   = 1;
+
+void configDefaults(Config& c)
+{
+  c.schema     = UPTICK_SCHEMA;
+  c.brightness = 40;
+  c.rotate180  = false;
+  c.mode         = "single_chart";
+  c.changeWindow = "chart";
+  c.dwellSec   = 15;
+  c.refreshSec = 30;
+  c.tz         = "Europe/Bratislava";
+  c.feedCount  = 1;
+  c.feeds[0]   = { "binance", "BTCUSDT", "BTC", "1h", 0 };
+}
+
+static void feedToJson(const Feed& f, JsonObject o)
+{
+  o["source"]   = f.source;
+  o["symbol"]   = f.symbol;
+  o["label"]    = f.label;
+  o["interval"] = f.interval;
+  o["decimals"] = f.decimals;
+}
+
+static void feedFromJson(JsonObjectConst o, Feed& f)
+{
+  f.source   = o["source"]   | "binance";
+  f.symbol   = o["symbol"]   | "BTCUSDT";
+  f.label    = o["label"]    | "";
+  f.interval = o["interval"] | "1h";
+  f.decimals = o["decimals"] | 0;
+  if (f.label.isEmpty()) f.label = f.symbol;
+}
+
+String configToJson()
+{
+  JsonDocument d;
+  {
+    CfgLock lk;
+    d["schema"]     = g_cfg.schema;
+    d["brightness"] = g_cfg.brightness;
+    d["rotate180"]  = g_cfg.rotate180;
+    d["mode"]         = g_cfg.mode;
+    d["changeWindow"] = g_cfg.changeWindow;
+    d["dwellSec"]   = g_cfg.dwellSec;
+    d["refreshSec"] = g_cfg.refreshSec;
+    d["tz"]         = g_cfg.tz;
+
+    JsonArray feeds = d["feeds"].to<JsonArray>();
+    for (uint8_t i = 0; i < g_cfg.feedCount; i++)
+      feedToJson(g_cfg.feeds[i], feeds.add<JsonObject>());
+  }
+  String out;
+  serializeJson(d, out);
+  return out;
+}
+
+bool configFromJson(const String& body, String& err)
+{
+  JsonDocument d;
+  DeserializationError e = deserializeJson(d, body);
+  if (e) { err = e.c_str(); return false; }
+
+  // Validate into a scratch copy first so a bad POST cannot leave the live
+  // config half-written while the render task is reading it.
+  Config c;
+  configDefaults(c);
+
+  c.schema     = UPTICK_SCHEMA;
+  c.brightness = constrain((int)(d["brightness"] | 40), 1, 100);
+  c.rotate180  = d["rotate180"] | false;
+  c.mode         = d["mode"]         | "single_chart";
+  c.changeWindow = d["changeWindow"] | "chart";
+  c.dwellSec   = constrain((int)(d["dwellSec"]   | 15), 3, 3600);
+  c.refreshSec = constrain((int)(d["refreshSec"] | 30), 10, 3600);
+  c.tz         = d["tz"] | "UTC";
+
+  if (c.mode != "single_chart" && c.mode != "multi_price") {
+    err = "unknown mode";
+    return false;
+  }
+
+  if (c.changeWindow != "chart" && c.changeWindow != "24h") {
+    err = "changeWindow must be chart or 24h";
+    return false;
+  }
+
+  JsonArrayConst feeds = d["feeds"].as<JsonArrayConst>();
+  if (feeds.isNull() || feeds.size() == 0) { err = "at least one feed required"; return false; }
+  if (feeds.size() > UPTICK_MAX_FEEDS)     { err = "too many feeds";            return false; }
+
+  c.feedCount = 0;
+  for (JsonObjectConst o : feeds) {
+    Feed f;
+    feedFromJson(o, f);
+    if (f.symbol.isEmpty()) { err = "feed with empty symbol"; return false; }
+    c.feeds[c.feedCount++] = f;
+  }
+
+  {
+    CfgLock lk;
+    g_cfg = c;
+    g_cfgRev++;
+  }
+
+  // Applied to RAM regardless - the panel and the poller pick it up either
+  // way. Only persistence can fail here, and saying so is the difference
+  // between "my settings reset" and a fixable error.
+  if (!configSave())
+  {
+    err = "settings applied but could not be written to flash";
+    return false;
+  }
+  return true;
+}
+
+bool configSave()
+{
+  String json = configToJson();
+
+  // Write to a temp file and rename, so a reset mid-write cannot leave a
+  // truncated config.json behind. The panel is stopped across the whole
+  // sequence - flash writes stall the bus and corrupt the matrix DMA.
+  displayPause();
+
+  File f = LittleFS.open("/config.tmp", "w");
+  if (!f) { Serial.println("[cfg] open for write failed"); return false; }
+  size_t n = f.print(json);
+  f.close();
+  if (n != json.length()) { Serial.println("[cfg] short write"); return false; }
+
+  LittleFS.remove(CFG_PATH);
+  if (!LittleFS.rename("/config.tmp", CFG_PATH)) {
+    Serial.println("[cfg] rename failed");
+    return false;
+  }
+  Serial.printf("[cfg] saved %u bytes\n", (unsigned)n);
+  return true;
+}
+
+bool configBegin()
+{
+  g_cfgMutex = xSemaphoreCreateMutex();
+  configDefaults(g_cfg);
+
+  File f = LittleFS.open(CFG_PATH, "r");
+  if (!f) {
+    Serial.println("[cfg] no config.json, writing defaults");
+    return configSave();
+  }
+
+  String body = f.readString();
+  f.close();
+
+  JsonDocument probe;
+  if (deserializeJson(probe, body)) {
+    Serial.println("[cfg] config.json is corrupt, falling back to defaults");
+    return configSave();
+  }
+
+  // Migration hook: schema bumps land here rather than silently loading a
+  // shape the current firmware no longer understands.
+  uint8_t schema = probe["schema"] | 0;
+  if (schema != UPTICK_SCHEMA) {
+    Serial.printf("[cfg] schema %u != %u, rewriting defaults\n", schema, UPTICK_SCHEMA);
+    return configSave();
+  }
+
+  String err;
+  if (!configFromJson(body, err)) {
+    Serial.printf("[cfg] rejected stored config (%s), using defaults\n", err.c_str());
+    configDefaults(g_cfg);
+    return configSave();
+  }
+
+  Serial.printf("[cfg] loaded, %u feed(s)\n", g_cfg.feedCount);
+  return true;
+}

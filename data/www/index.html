@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uptick</title>
+<style>
+  :root {
+    --bg:#0d1117; --card:#161b22; --line:#30363d;
+    --fg:#e6edf3; --dim:#8b949e; --up:#3fb950; --down:#f85149; --accent:#2f81f7;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:16px; background:var(--bg); color:var(--fg);
+    font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .wrap { max-width:640px; margin:0 auto; }
+  header { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
+  h1 { font-size:22px; margin:0; letter-spacing:1px; }
+  h1 .tick { color:var(--up); }
+  .ver { color:var(--dim); font-size:12px; }
+  #status { color:var(--dim); font-size:12px; margin-bottom:16px; }
+  .card {
+    background:var(--card); border:1px solid var(--line); border-radius:8px;
+    padding:14px; margin-bottom:12px;
+  }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:1px;
+             color:var(--dim); margin:0 0 12px; font-weight:600; }
+  label { display:block; font-size:12px; color:var(--dim); margin:10px 0 4px; }
+  input, select, button {
+    font:inherit; background:#0d1117; color:var(--fg);
+    border:1px solid var(--line); border-radius:6px; padding:7px 9px; width:100%;
+  }
+  input[type=range] { padding:0; }
+  input[type=checkbox] { width:auto; }
+  button { cursor:pointer; background:#21262d; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button.danger:hover { border-color:var(--down); color:var(--down); }
+  .row { display:flex; gap:10px; }
+  .row > * { flex:1; }
+  .feed { border:1px solid var(--line); border-radius:6px; padding:10px; margin-bottom:8px; }
+  .feed .head { display:flex; justify-content:space-between; align-items:center; }
+  .feed .head b { color:var(--up); }
+  .x { width:auto; padding:2px 9px; line-height:1.2; }
+  .net { display:flex; justify-content:space-between; padding:7px 0;
+         border-bottom:1px solid var(--line); cursor:pointer; }
+  .net:hover b { color:var(--accent); }
+  .net span { color:var(--dim); font-size:12px; }
+  #toast {
+    position:fixed; left:50%; bottom:20px; transform:translateX(-50%);
+    background:var(--card); border:1px solid var(--line); border-radius:6px;
+    padding:9px 16px; opacity:0; transition:opacity .2s; pointer-events:none;
+  }
+  #toast.show { opacity:1; }
+  #toast.bad { border-color:var(--down); color:var(--down); }
+  .hide { display:none; }
+  .hint { color:var(--dim); font-size:11px; margin:10px 0 0; }
+  .dirty #saveAll { box-shadow:0 0 0 2px var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>up<span class="tick">tick</span></h1>
+    <span class="ver" id="ver"></span>
+  </header>
+  <div id="status">connecting...</div>
+
+  <div class="card hide" id="wifiCard">
+    <h2>WiFi</h2>
+    <div id="netList"></div>
+    <label>Network</label>
+    <input id="ssid" placeholder="SSID">
+    <label>Password</label>
+    <input id="pass" type="password" placeholder="leave blank if open">
+    <div style="height:12px"></div>
+    <button class="primary" onclick="saveWifi()">Join and restart</button>
+  </div>
+
+  <div class="card">
+    <h2>Feeds</h2>
+    <div id="feeds"></div>
+    <div class="row">
+      <button onclick="addFeed()">+ add feed</button>
+      <button class="primary" onclick="saveConfig()">Save</button>
+    </div>
+    <p class="hint">Feed edits are not stored until you save.</p>
+  </div>
+
+  <div class="card">
+    <h2>Display</h2>
+    <label>Brightness <span id="briVal"></span></label>
+    <input type="range" id="brightness" min="1" max="100" oninput="liveBrightness()">
+    <p class="hint">Live preview only - save to keep it across a reset.</p>
+    <div class="row">
+      <div>
+        <label>Mode</label>
+        <select id="mode">
+          <option value="single_chart">single + chart</option>
+          <option value="multi_price">multi price</option>
+        </select>
+      </div>
+      <div>
+        <label>Seconds per feed</label>
+        <input id="dwellSec" type="number" min="3" max="3600">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Refresh (seconds)</label>
+        <input id="refreshSec" type="number" min="10" max="3600">
+      </div>
+      <div>
+        <label>Timezone</label>
+        <input id="tz">
+      </div>
+    </div>
+    <label>Percentage shown</label>
+    <select id="changeWindow">
+      <option value="chart">chart window - matches the graph</option>
+      <option value="24h">fixed 24 hours</option>
+    </select>
+    <label><input type="checkbox" id="rotate180"> rotate 180 degrees</label>
+  </div>
+
+  <button class="primary" id="saveAll" onclick="saveConfig()">Save settings</button>
+  <div style="height:12px"></div>
+
+  <div class="card">
+    <h2>Maintenance</h2>
+    <label>Firmware (.bin)</label>
+    <input type="file" id="fw" accept=".bin">
+    <div style="height:8px"></div>
+    <button onclick="upload()">Upload and restart</button>
+    <div style="height:14px"></div>
+    <button class="danger" onclick="forget()">Forget WiFi</button>
+  </div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+let cfg = null;
+
+const $ = id => document.getElementById(id);
+
+function dirty(on) { document.body.classList.toggle('dirty', on !== false); }
+
+function toast(msg, bad) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'show' + (bad ? ' bad' : '');
+  setTimeout(() => t.className = '', 2200);
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || r.status);
+  return body;
+}
+
+// ---------------------------------------------------------------- status
+
+async function loadStatus() {
+  const s = await api('/api/status');
+  $('ver').textContent = 'v' + s.version;
+  $('status').textContent = s.mode === 'ap'
+    ? 'setup mode - AP ' + s.ssid + ' at ' + s.ip
+    : s.ssid + '  ' + s.ip + '  ' + s.rssi + 'dBm  heap ' +
+      Math.round(s.heapFree / 1024) + 'k  up ' + Math.round(s.uptimeSec / 60) + 'm';
+
+  if (s.mode === 'ap') {
+    $('wifiCard').classList.remove('hide');
+    scan();
+  }
+}
+
+async function scan() {
+  try {
+    const nets = await api('/api/scan');
+    $('netList').innerHTML = nets
+      .sort((a, b) => b.rssi - a.rssi)
+      .map(n => '<div class="net" onclick="pick(this)"><b>' + n.ssid +
+                '</b><span>' + n.rssi + 'dBm' + (n.open ? ' open' : '') + '</span></div>')
+      .join('');
+  } catch (e) { /* scanning can fail while the AP is busy; the manual field still works */ }
+}
+
+function pick(el) {
+  $('ssid').value = el.querySelector('b').textContent;
+  $('pass').focus();
+}
+
+async function saveWifi() {
+  if (!$('ssid').value) return toast('pick a network', true);
+  try {
+    await api('/api/wifi', {
+      method: 'POST',
+      body: JSON.stringify({ ssid: $('ssid').value, pass: $('pass').value })
+    });
+    toast('restarting - reconnect to your normal WiFi, then open uptick.local');
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------------------------------------------------------------- config
+
+async function loadConfig() {
+  cfg = await api('/api/config');
+  $('brightness').value = cfg.brightness;
+  $('briVal').textContent = cfg.brightness + '%';
+  $('mode').value        = cfg.mode;
+  $('changeWindow').value = cfg.changeWindow || 'chart';
+  $('dwellSec').value    = cfg.dwellSec;
+  $('refreshSec').value  = cfg.refreshSec;
+  $('tz').value          = cfg.tz;
+  $('rotate180').checked = cfg.rotate180;
+  renderFeeds();
+}
+
+function renderFeeds() {
+  $('feeds').innerHTML = cfg.feeds.map((f, i) => `
+    <div class="feed">
+      <div class="head"><b>${f.label || f.symbol}</b>
+        <button class="x" onclick="delFeed(${i})">x</button></div>
+      <div class="row">
+        <div><label>Symbol</label>
+          <input value="${f.symbol}" oninput="cfg.feeds[${i}].symbol=this.value"></div>
+        <div><label>Label</label>
+          <input value="${f.label}" oninput="cfg.feeds[${i}].label=this.value"></div>
+      </div>
+      <div class="row">
+        <div><label>Source</label>
+          <select onchange="cfg.feeds[${i}].source=this.value">
+            <option value="binance" ${f.source === 'binance' ? 'selected' : ''}>binance</option>
+            <option value="coinbase" ${f.source === 'coinbase' ? 'selected' : ''}>coinbase</option>
+          </select></div>
+        <div><label>Interval</label>
+          <select onchange="cfg.feeds[${i}].interval=this.value">
+            ${['5m','15m','1h','4h','1d'].map(v =>
+              `<option ${f.interval === v ? 'selected' : ''}>${v}</option>`).join('')}
+          </select></div>
+        <div><label>Decimals</label>
+          <input type="number" min="0" max="8" value="${f.decimals}"
+                 oninput="cfg.feeds[${i}].decimals=+this.value"></div>
+      </div>
+    </div>`).join('');
+}
+
+function addFeed() {
+  if (cfg.feeds.length >= 8) return toast('8 feeds max', true);
+  cfg.feeds.push({ source:'binance', symbol:'ETHUSDT', label:'ETH', interval:'1h', decimals:2 });
+  renderFeeds();
+  dirty();
+}
+
+function delFeed(i) {
+  if (cfg.feeds.length === 1) return toast('keep at least one feed', true);
+  cfg.feeds.splice(i, 1);
+  renderFeeds();
+  dirty();
+}
+
+// Fires while dragging - not persisted, so the panel responds immediately but
+// the saved value only changes when Save is pressed.
+let briTimer = null;
+function liveBrightness() {
+  const v = +$('brightness').value;
+  $('briVal').textContent = v + '%';
+  clearTimeout(briTimer);
+  briTimer = setTimeout(() => {
+    fetch('/api/brightness', { method:'POST', body: JSON.stringify({ brightness: v }) });
+  }, 120);
+}
+
+async function saveConfig() {
+  cfg.brightness = +$('brightness').value;
+  cfg.mode         = $('mode').value;
+  cfg.changeWindow = $('changeWindow').value;
+  cfg.dwellSec   = +$('dwellSec').value;
+  cfg.refreshSec = +$('refreshSec').value;
+  cfg.tz         = $('tz').value;
+  cfg.rotate180  = $('rotate180').checked;
+  try {
+    await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
+    toast('saved');
+    dirty(false);
+    renderFeeds();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------------------------------------------------------------- maintenance
+
+function upload() {
+  const f = $('fw').files[0];
+  if (!f) return toast('pick a .bin first', true);
+  const fd = new FormData();
+  fd.append('firmware', f);
+  toast('uploading ' + Math.round(f.size / 1024) + 'k...');
+  fetch('/api/update', { method:'POST', body: fd })
+    .then(r => toast(r.ok ? 'flashed, restarting' : 'update failed', !r.ok))
+    .catch(() => toast('update failed', true));
+}
+
+async function forget() {
+  if (!confirm('Erase stored WiFi credentials and restart into setup mode?')) return;
+  await fetch('/api/forget', { method:'POST' });
+  toast('restarting into setup mode');
+}
+
+// ---------------------------------------------------------------- boot
+
+loadStatus().then(loadConfig).catch(e => $('status').textContent = 'error: ' + e.message);
+setInterval(loadStatus, 10000);
+</script>
+</body>
+</html>
