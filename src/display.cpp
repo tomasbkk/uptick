@@ -28,7 +28,7 @@ static volatile uint32_t s_tickerUs   = 0;
 // runs in between, and when that is slow the splash has already been up long
 // enough.
 static uint32_t          s_splashAt   = 0;
-static const uint32_t    SPLASH_MS    = 2500;
+static const uint32_t    SPLASH_MS    = 5000;
 
 // Brightness last written to the OE bits. setBrightness8 walks the whole of
 // both DMA buffers, so it runs when the value changes, not every frame.

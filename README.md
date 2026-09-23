@@ -58,7 +58,7 @@ Note the monitor holds the port - close it before uploading or the flash fails w
 3. Pick your network, enter the password, save. The device restarts and joins.
 4. The panel shows the SSID, IP and `uptick.local` for eight seconds after joining, so the address is always recoverable without a serial cable.
 
-Every boot opens on a splash: the wordmark from the web page, "up" in white and "tick" in green, with the firmware version in the bottom-right corner. It stays up for at least 2.5 seconds, counted from when the panel starts, so a slow WiFi join leaves it up no longer than the join takes. Its colours are fixed rather than taken from the palette, so tuning the palette never changes the logo.
+Every boot opens on a splash: the wordmark from the web page, "up" in white and "tick" in green, with the firmware version in the bottom-right corner. It stays up for at least 5 seconds, counted from when the panel starts, so a slow WiFi join leaves it up no longer than the join takes. Its colours are fixed rather than taken from the palette, so tuning the palette never changes the logo.
 
 To start over, use Forget WiFi on the config page, or erase NVS with `pio run -t erase`.
 
