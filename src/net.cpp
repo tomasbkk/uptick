@@ -62,11 +62,8 @@ static void handleStatus()
 
   // Where things actually run, rather than where they are meant to.
   const DisplayStats ds = displayGetStats();
-  d["refreshLow"]  = ds.low;
-  d["refreshPeak"] = ds.peak;
-  d["refreshDips"] = ds.dips;
+  d["bitDepth"]    = ds.depth;
   d["coreDisplay"] = ds.taskCore;
-  d["corePanelISR"]= ds.beginCore;
   d["coreNet"]     = xPortGetCoreID();
 
   String out;
@@ -83,29 +80,10 @@ static void handlePostConfig()
 {
   if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
 
-  uint8_t depthBefore;
-  { CfgLock lk; depthBefore = g_cfg.bitDepth; }
-
   String err;
   if (!configFromJson(http.arg("plain"), err)) { sendErr(400, err); return; }
 
-  uint8_t depthAfter;
-  { CfgLock lk; depthAfter = g_cfg.bitDepth; }
-
   Serial.println("[net] config updated");
-
-  // Protomatter takes colour depth in its constructor, so it can only change
-  // on a restart. The new value is already persisted, so it is picked up on
-  // the way back up. Tearing down a live DMA chain instead is not worth the
-  // risk for a setting that changes once in a while.
-  if (depthAfter != depthBefore)
-  {
-    Serial.printf("[net] bit depth %u -> %u, restarting\n", depthBefore, depthAfter);
-    sendJson(200, "{\"ok\":true,\"restarting\":true}");
-    delay(400);
-    ESP.restart();
-  }
-
   sendOk();
 }
 
@@ -574,7 +552,6 @@ void netBegin()
   http.on("/api/apikey",     HTTP_POST, handleApiKey);
   http.on("/api/fetch",      HTTP_POST, handleFetch);
   http.on("/api/check",      HTTP_GET,  handleCheck);
-  http.on("/api/stats",      HTTP_POST, [](){ displayResetStats(); sendOk(); });
   http.on("/api/palette",    HTTP_GET,  handlePaletteGet);
   http.on("/api/palette",    HTTP_POST, handlePalettePost);
   http.on("/api/wifisleep",  HTTP_POST, handleWifiSleep);

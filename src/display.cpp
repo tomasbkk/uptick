@@ -1,23 +1,28 @@
 #include "uptick.h"
 #include "pins.h"
-#include <Adafruit_Protomatter.h>
+#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <Fonts/TomThumb.h>
+#include <driver/gpio.h>
 
-// Heap-allocated rather than a static global, because Protomatter takes the
-// colour depth as a constructor argument and depth is a user setting. It is
-// built once in displayBegin() from the stored config; changing the setting
-// restarts the device rather than tearing down a live DMA chain.
-static Adafruit_Protomatter* matrix = nullptr;
+// The panel is driven by a circular DMA chain: every bit-plane of every row,
+// latch and OE timing included, is laid out in internal RAM as a ring of
+// descriptors that the LCD peripheral walks forever. No interrupt fires
+// between bit-planes and no CPU is involved in refresh at all, so nothing the
+// firmware does - TLS, WiFi, flash writes - can make the panel flicker.
+//
+// Protomatter, which this replaced, needed a timer interrupt between every
+// bit-plane: ~10,700 deadlines a second at 5-bit, any one of which a busy CPU
+// could miss. That is what flicker physically was.
+static MatrixPanel_I2S_DMA* matrix = nullptr;
 
 static bool              s_ok         = false;
 static SemaphoreHandle_t s_panelMutex = nullptr;
-static uint8_t           s_brightness = 40;
 static uint16_t          s_refreshHz  = 0;
-static uint16_t          s_refreshLow = 0xFFFF;
-static uint16_t          s_refreshPk  = 0;
-static uint32_t          s_refreshDip = 0;
 static uint8_t           s_taskCore   = 0xFF;
-static uint8_t           s_beginCore  = 0xFF;
+
+// Brightness last written to the OE bits. setBrightness8 walks the whole of
+// both DMA buffers, so it runs when the value changes, not every frame.
+static int16_t           s_appliedBri = -1;
 
 uint16_t displayRefreshHz() { return s_refreshHz; }
 
@@ -31,20 +36,10 @@ int displayVisibleFeed() { return s_visibleFeed; }
 DisplayStats displayGetStats()
 {
   DisplayStats st;
-  st.hz        = s_refreshHz;
-  st.low       = (s_refreshLow == 0xFFFF) ? 0 : s_refreshLow;
-  st.peak      = s_refreshPk;
-  st.dips      = s_refreshDip;
-  st.taskCore  = s_taskCore;
-  st.beginCore = s_beginCore;
+  st.hz       = s_refreshHz;
+  st.depth    = PANEL_BIT_DEPTH;
+  st.taskCore = s_taskCore;
   return st;
-}
-
-void displayResetStats()
-{
-  s_refreshLow = 0xFFFF;
-  s_refreshPk  = 0;
-  s_refreshDip = 0;
 }
 
 // Everything that can change what is on screen. Compared with memcmp, so it is
@@ -62,15 +57,11 @@ struct FrameKey
   uint8_t  pad[3];
 };
 
-// Writing to flash on the S3 can starve the matrix DMA and glitch a frame, so
-// config saves bracket the write with these to keep show() - which rebuilds
-// bitplanes and touches DMA descriptors - from running at the same moment.
-//
-// These deliberately do NOT call matrix->stop() / matrix->resume(). On the S3,
-// stop() kills the refresh and resume() does not bring it back when the pair
-// is called from a different task than the one driving the panel: the display
-// goes black and stays black until reset. Holding the mutex is enough. Any
-// corruption that does slip through is one frame and the next redraw fixes it.
+// Holding this keeps the render task from drawing. It used to protect the
+// refresh from flash writes; the DMA chain lives in internal RAM and needs no
+// cache, so it runs straight through them now. What still needs it is
+// config.cpp, which swaps the config and the quotes under separate mutexes and
+// must not let a frame be drawn from one new and one old.
 void displayPause()
 {
   if (!s_ok) return;
@@ -85,34 +76,61 @@ void displayResume()
 
 // ---------------------------------------------------------------- colour
 
-// Protomatter has no brightness control, so brightness is a scale applied to
-// every colour before it is drawn. The 200 cap means "white" is never actually
-// 255,255,255 - indistinguishable at this pixel pitch, and it keeps the worst
-// case current well clear of what a 3 A supply will give up.
-static const uint8_t MAX_COMPONENT = 200;
-
-// The slider is perceptual, the panel is linear, and the 565 conversion throws
-// away anything below 8/255 on red and blue. Scaling straight by percent made
-// the bottom of the slider render pure black - at which point you cannot see
-// the panel well enough to drag it back up, and a reset is the only way out.
+// Colours go to the panel as they are. Brightness used to be a scale applied
+// to every colour before drawing, because Protomatter had no other way to dim -
+// and that was the root of two long-running problems: dark colours scaled
+// below what the panel could show and rendered black, and the components did
+// not scale in proportion, so red drifted orange as brightness rose.
 //
-// So the 1-100 slider maps onto an 8-100 output range with a square curve:
-// the curve gives it a natural feel, the floor guarantees the darkest setting
-// is still legible.
-static const uint8_t MIN_SCALE = 8;
-
+// Brightness is now the panel's OE duty cycle, set once by setBrightness8 and
+// preserved by every draw call (they clear only the six RGB bits of each DMA
+// word; OE is bit 7). The palette is therefore the palette at every
+// brightness, and the driver's CIE 1931 table handles perceptual linearity.
 static uint16_t col(uint8_t r, uint8_t g, uint8_t b)
 {
-  const uint8_t  pct    = s_brightness < 1 ? 1 : s_brightness;
-  const uint32_t curved = (uint32_t)pct * pct;                          // 1..10000
-  const uint8_t  scale  = MIN_SCALE + (uint8_t)((curved * (100 - MIN_SCALE)) / 10000);
+  return matrix->color565(r, g, b);
+}
 
-  auto s = [scale](uint8_t v) -> uint8_t
-  {
-    uint16_t capped = v < MAX_COMPONENT ? v : MAX_COMPONENT;
-    return (uint8_t)((uint32_t)capped * scale / 100);
-  };
-  return matrix->color565(s(r), s(g), s(b));
+// Slider percent to the driver's 0-255 duty. Linear, so "5%" means 5% duty
+// and a stored value keeps its meaning. No floor is needed: the driver keeps
+// at least one pixel-clock of output per bit-plane for any non-zero value, so
+// the bottom of the slider is dim but never dark.
+static void applyBrightness(uint8_t pct)
+{
+  if (pct < 1)   pct = 1;
+  if (pct > 100) pct = 100;
+  if (s_appliedBri == pct) return;
+
+  matrix->setBrightness8((uint8_t)(((uint16_t)pct * 255 + 50) / 100));
+  s_appliedBri = pct;
+}
+
+// Double buffering, and the one rule that comes with it here.
+//
+// A flip only rewires the last descriptor of each chain to point at the other
+// buffer, so the DMA moves across when it finishes the frame it is on - which
+// can be up to a full frame after flipDMABuffer() returns. Until then, the
+// buffer that drawing now targets is still the one on screen, and writing to
+// it tears. The driver's own wait for this is commented out on the S3, so it is
+// enforced here: no drawing until two frame periods have passed since a flip.
+//
+// The render loop sleeps far longer than that today, so this costs nothing -
+// it exists for scrolling, where frames come fast enough for it to matter.
+static uint32_t s_frameUs    = 0;
+static uint32_t s_lastFlipUs = 0;
+
+static void flip()
+{
+  matrix->flipDMABuffer();
+  s_lastFlipUs = micros();
+}
+
+static void waitForFlip()
+{
+  const uint32_t guardUs = 2 * s_frameUs;
+  const uint32_t sinceUs = micros() - s_lastFlipUs;
+  if (sinceUs >= guardUs) return;
+  vTaskDelay(pdMS_TO_TICKS((guardUs - sinceUs) / 1000 + 1));
 }
 
 // The palette, as 8-bit RGB before brightness scaling. Order must match
@@ -506,37 +524,55 @@ bool displayBegin()
 {
   s_panelMutex = xSemaphoreCreateMutex();
 
-  uint8_t depth;
-  {
-    CfgLock lk;
-    depth = g_cfg.bitDepth;
-  }
-  if (depth < PANEL_BIT_DEPTH_MIN || depth > PANEL_BIT_DEPTH_MAX)
-    depth = PANEL_BIT_DEPTH_DEFAULT;
+  HUB75_I2S_CFG::i2s_pins pins = {
+    HUB75_R1, HUB75_G1, HUB75_B1, HUB75_R2, HUB75_G2, HUB75_B2,
+    HUB75_A,  HUB75_B,  HUB75_C,  HUB75_D,  HUB75_E,
+    HUB75_LAT, HUB75_OE, HUB75_CLK
+  };
 
-  matrix = new Adafruit_Protomatter(
-    PANEL_W, depth,
-    1, HUB75_RGB,
-    HUB75_ADDR_COUNT, HUB75_ADDR,
-    HUB75_CLK, HUB75_LAT, HUB75_OE,
-    true);                          // double buffered
+  HUB75_I2S_CFG mx(PANEL_W, PANEL_H, 1, pins);
+  mx.double_buff = true;
+  mx.i2sspeed    = (HUB75_I2S_CFG::clk_speed)HUB75_CLOCK_HZ;
+  mx.setPixelColorDepthBits(PANEL_BIT_DEPTH);
 
+  matrix = new MatrixPanel_I2S_DMA(mx);
   if (!matrix)
   {
     Serial.println("[panel] allocation failed");
     return false;
   }
 
-  ProtomatterStatus st = matrix->begin();
-  if (st != PROTOMATTER_OK)
+  // Allocates both DMA buffers in internal RAM and starts the chain. Failure
+  // here is almost always that allocation - it wants one contiguous-enough
+  // block per buffer, so it is done at boot before the heap fragments.
+  const uint32_t heapBefore = ESP.getFreeHeap();
+  if (!matrix->begin())
   {
-    Serial.printf("[panel] protomatter init failed: %d\n", (int)st);
+    Serial.println("[panel] DMA init failed - not enough internal RAM?");
     return false;
   }
 
+  // begin() forces every line to the maximum drive strength; bring them back
+  // down. See HUB75_DRIVE in pins.h for why, and what it cost WiFi.
+  const int8_t lines[] = {
+    HUB75_R1, HUB75_G1, HUB75_B1, HUB75_R2, HUB75_G2, HUB75_B2,
+    HUB75_A,  HUB75_B,  HUB75_C,  HUB75_D,  HUB75_E,
+    HUB75_LAT, HUB75_OE, HUB75_CLK
+  };
+  for (int8_t pin : lines)
+    if (pin >= 0) gpio_set_drive_capability((gpio_num_t)pin, (gpio_drive_cap_t)HUB75_DRIVE);
+
   s_ok        = true;
-  s_beginCore = xPortGetCoreID();
+  s_refreshHz = (uint16_t)matrix->calculated_refresh_rate;
+  s_frameUs   = s_refreshHz ? 1000000UL / s_refreshHz : 10000;
   displayPaletteReset();
+
+  uint8_t bri;
+  {
+    CfgLock lk;
+    bri = g_cfg.brightness;
+  }
+  applyBrightness(bri);
 
   // Adafruit_GFX wraps by default, and it decides using the glyph ADVANCE, not
   // its ink: a right-aligned string whose last character ends flush at column
@@ -548,9 +584,12 @@ bool displayBegin()
 
   matrix->fillScreen(0);
   drawTiny(0, 12, "UPTICK " UPTICK_VERSION, C_ACCENT());
-  matrix->show();
+  flip();
 
-  Serial.printf("[panel] %ux%u, %u-bit\n", PANEL_W, PANEL_H, depth);
+  Serial.printf("[panel] %ux%u, %u-bit, %u Hz, %lu MHz clock, %lu bytes DMA\n",
+                PANEL_W, PANEL_H, PANEL_BIT_DEPTH, s_refreshHz,
+                (unsigned long)(HUB75_CLOCK_HZ / 1000000UL),
+                (unsigned long)(heapBefore - ESP.getFreeHeap()));
   return true;
 }
 
@@ -562,8 +601,7 @@ void displayTask(void* arg)
   uint32_t lastSwap  = millis();
   s_taskCore = xPortGetCoreID();
 
-  uint32_t taskStart    = millis();
-  uint32_t lastHzSample = millis();
+  uint32_t taskStart = millis();
 
   FrameKey lastKey;
   memset(&lastKey, 0xFF, sizeof(lastKey));
@@ -614,7 +652,7 @@ void displayTask(void* arg)
           }
     }
 
-    s_brightness = cfg.brightness;
+    applyBrightness(cfg.brightness);
     matrix->setRotation(cfg.rotate180 ? 2 : 0);
 
     if (feedIdx >= cfg.feedCount) feedIdx = 0;
@@ -670,45 +708,15 @@ void displayTask(void* arg)
     key.stale    = stale    ? 1 : 0;
     key.showInfo = showInfo ? 1 : 0;
 
-    // Sampled whether or not the frame is redrawn: it measures the panel's own
-    // refresh, which runs off DMA and has nothing to do with this loop.
-    // Sampled every 200 ms, not every second. A flicker is a stall of a few
-    // tens of milliseconds; averaged over a full second that is a ~5% dent in
-    // the rate and invisible in the numbers. At 200 ms the same stall halves
-    // the window's rate and shows up clearly.
-    if (millis() - lastHzSample >= 200)
-    {
-      // getFrameCount() returns frames since the LAST call, so it has to be
-      // divided by the interval that actually elapsed. Assuming 1000 ms made
-      // a delayed sample look like a higher refresh rate rather than a lower
-      // one - exactly backwards, and it reported a peak of 214 Hz on a panel
-      // running at 136.
-      const uint32_t now     = millis();
-      const uint32_t elapsed = now - lastHzSample;
-      const uint32_t frames  = matrix->getFrameCount();
-
-      s_refreshHz  = elapsed ? (uint16_t)((frames * 1000UL) / elapsed) : 0;
-      lastHzSample = now;
-
-      // The first couple of samples after boot are partial, so ignore zeroes.
-      if (s_refreshHz > 0)
-      {
-        if (s_refreshHz > s_refreshPk)  s_refreshPk  = s_refreshHz;
-        if (s_refreshHz < s_refreshLow) s_refreshLow = s_refreshHz;
-
-        // A dip is a second in which the panel refreshed materially less than
-        // its best. That is what a flicker actually is, counted rather than
-        // eyeballed.
-        if (s_refreshPk && s_refreshHz < (uint16_t)(s_refreshPk * 8 / 10))
-          s_refreshDip++;
-      }
-    }
-
+    // Redraws are still gated on a change, but no longer to protect the
+    // refresh - a redraw cannot disturb the DMA chain now. It is simply that a
+    // static frame has no reason to be rebuilt.
     if (memcmp(&key, &lastKey, sizeof(key)) != 0)
     {
       lastKey = key;
 
       xSemaphoreTake(s_panelMutex, portMAX_DELAY);
+      waitForFlip();
 
       if (cfg.mode == "palette_test")      drawPaletteTest();
       else if (cfg.mode == "ramp_test")    drawRampTest();
@@ -718,7 +726,7 @@ void displayTask(void* arg)
       else if (!q.valid)                   drawWaiting(cfg.feeds[feedIdx]);
       else                                 drawSingleChart(cfg, cfg.feeds[feedIdx], q, stale);
 
-      matrix->show();
+      flip();
       xSemaphoreGive(s_panelMutex);
     }
 

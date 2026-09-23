@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.13.0"
+#define UPTICK_VERSION   "0.14.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 8
 
@@ -23,8 +23,7 @@ struct Feed
 struct Config
 {
   uint8_t  schema;
-  uint8_t  brightness;   // 1-100
-  uint8_t  bitDepth;     // 3-6; applied at boot, Protomatter takes it in its ctor
+  uint8_t  brightness;   // 1-100, applied as OE duty cycle
   bool     rotate180;
   bool     wifiSleep;    // radio power save; off measurably steadies the panel
   String   mode;         // "single_chart" | "multi_price"
@@ -136,34 +135,30 @@ void netTask(void* arg);            // pinned to core 0
 bool displayBegin();
 void displayTask(void* arg);        // pinned to core 1
 
-// Bracket every flash write with these: they keep the renderer off the panel
-// while LittleFS writes, which can otherwise starve the matrix DMA.
+// Keeps the renderer from drawing while held. The panel's refresh no longer
+// needs protecting - it is a circular DMA chain in internal RAM and runs
+// through flash writes untouched - but config.cpp still uses this to swap the
+// config and the quotes without a frame landing in between.
 void displayPause();
 void displayResume();
 
-// Measured panel refresh, sampled once a second. A steady figure means the
-// refresh ISR is running freely; dips are what visible flicker actually is.
+// Panel refresh rate. Computed by the driver from the clock, depth and scan
+// rather than sampled: with no CPU in the refresh loop there is nothing to
+// vary, so a measured figure would only ever read back this same number.
 uint16_t displayRefreshHz();
 
 // Which feed is on screen, or -1 when the layout shows all of them (or none,
 // as on the test screens). The fetcher uses this to poll only what is visible.
 int displayVisibleFeed();
 
-// Refresh stability, so flicker can be counted instead of watched for.
-// peak is the best rate seen, low the worst, dips the number of one-second
-// samples that came in under 90% of peak. Cores are reported to confirm the
-// task split rather than assume it.
+// Cores are reported to confirm the task split rather than assume it.
 struct DisplayStats
 {
   uint16_t hz;
-  uint16_t low;
-  uint16_t peak;
-  uint32_t dips;
+  uint8_t  depth;
   uint8_t  taskCore;
-  uint8_t  beginCore;
 };
 DisplayStats displayGetStats();
-void         displayResetStats();
 
 // Live palette override, for tuning colours against the real panel instead of
 // guessing at RGB triples. Applied in RAM only - the web page remembers the

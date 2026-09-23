@@ -13,7 +13,6 @@ void configDefaults(Config& c)
 {
   c.schema     = UPTICK_SCHEMA;
   c.brightness = PANEL_BRIGHTNESS_DEFAULT;
-  c.bitDepth   = PANEL_BIT_DEPTH_DEFAULT;
   c.rotate180  = false;
   // Default off: measured on this panel, power save costs a few percent of
   // refresh stability, and the ~40 mA it saves is irrelevant on mains power.
@@ -57,7 +56,6 @@ String configToJson()
     CfgLock lk;
     d["schema"]     = g_cfg.schema;
     d["brightness"] = g_cfg.brightness;
-    d["bitDepth"]   = g_cfg.bitDepth;
     d["rotate180"]  = g_cfg.rotate180;
     d["wifiSleep"]  = g_cfg.wifiSleep;
     d["mode"]         = g_cfg.mode;
@@ -86,9 +84,10 @@ bool configFromJson(const String& body, String& err)
   configDefaults(c);
 
   c.schema     = UPTICK_SCHEMA;
+  // A "bitDepth" key from an older config is ignored rather than rejected:
+  // depth is fixed by the build now, and refusing the whole document over it
+  // would lose everything else in a backup restore.
   c.brightness = constrain((int)(d["brightness"] | PANEL_BRIGHTNESS_DEFAULT), 1, 100);
-  c.bitDepth   = constrain((int)(d["bitDepth"] | PANEL_BIT_DEPTH_DEFAULT),
-                           PANEL_BIT_DEPTH_MIN, PANEL_BIT_DEPTH_MAX);
   c.rotate180  = d["rotate180"] | false;
   c.wifiSleep  = d["wifiSleep"] | false;
   c.mode         = d["mode"]         | "single_chart";

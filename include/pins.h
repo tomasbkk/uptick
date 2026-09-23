@@ -4,40 +4,62 @@
 // HUB75 wiring for the Adafruit Matrix Portal S3.
 //
 // Verified against Adafruit_Protomatter's own example, which selects these
-// under ARDUINO_ADAFRUIT_MATRIXPORTAL_ESP32S3. Non-const because Protomatter
-// takes uint8_t* rather than pointer-to-const.
+// under ARDUINO_ADAFRUIT_MATRIXPORTAL_ESP32S3, and unchanged by the move to
+// the DMA driver - the pins are the board's, not the library's.
 
-static uint8_t HUB75_RGB[]  = {42, 41, 40, 38, 39, 37}; // R1 G1 B1 R2 G2 B2
-static uint8_t HUB75_ADDR[] = {45, 36, 48, 35, 21};     // A  B  C  D  (E)
+static const int8_t HUB75_R1 = 42, HUB75_G1 = 41, HUB75_B1 = 40;
+static const int8_t HUB75_R2 = 38, HUB75_G2 = 39, HUB75_B2 = 37;
 
-static const uint8_t HUB75_CLK = 2;
-static const uint8_t HUB75_LAT = 47;
-static const uint8_t HUB75_OE  = 14;
+// Our P4 panel is 1/16 scan, so A-D address 16 row pairs and E is unused.
+// The board does route E to GPIO 21 for 64-row panels, behind a jumper.
+static const int8_t HUB75_A = 45, HUB75_B = 36, HUB75_C = 48, HUB75_D = 35;
+static const int8_t HUB75_E = -1;
+
+static const int8_t HUB75_CLK = 2;
+static const int8_t HUB75_LAT = 47;
+static const int8_t HUB75_OE  = 14;
 
 static const uint16_t PANEL_W = 64;
 static const uint16_t PANEL_H = 32;
 
-// Protomatter derives height from the address line count: 2 * 2^addrCount.
-// Our P4 panel is 1/16 scan, so 4 lines -> 32 rows, and pin E stays unused.
-// A 64x64 panel would use 5 here (and need the board's address-E jumper).
-static const uint8_t HUB75_ADDR_COUNT = 4;
+// Colour depth comes from the build, not from config. The DMA library chooses
+// its gamma table from PIXEL_COLOR_DEPTH_BITS at compile time and uses that
+// table's output without rescaling it to the runtime depth, so the two must be
+// equal or bright colours lose their top bit. Deriving one from the other makes
+// that impossible to get wrong. Set it in platformio.ini.
+#ifndef PIXEL_COLOR_DEPTH_BITS
+#error "PIXEL_COLOR_DEPTH_BITS must be set in platformio.ini build_flags"
+#endif
+static const uint8_t PANEL_BIT_DEPTH = PIXEL_COLOR_DEPTH_BITS;
 
-// Colour depth per channel is the single biggest lever on refresh rate: frame
-// time scales with (2^depth - 1), so every bit dropped roughly halves it.
+// Shift clock. The S3 divides a 160 MHz source, so the library rounds a request
+// to 10, 16 or ~23 MHz. 16 is the one where the requested and real clocks
+// match exactly, which also keeps the library's computed refresh rate honest -
+// asking for 8 actually runs at 10 and under-reports by a fifth.
 //
-// Measured on this panel: 6 bits -> 70 Hz, 5 bits -> ~110 Hz, 4 bits -> 221 Hz.
-// 5 is the default: 32 levels per channel is enough for real tonal range, and
-// ~110 Hz proved acceptable once flash reads stopped stalling the refresh.
+// At 7-bit that computes to ~223 Hz. If the panel ever shows ghosting or
+// smeared columns, drop to 8 MHz (~111 Hz at 7-bit) before anything else.
+static const uint32_t HUB75_CLOCK_HZ = 16000000;
+
+// GPIO drive strength for every HUB75 line, 0 (~5 mA) to 3 (~40 mA).
 //
-// This is only the fallback. The live value is config.bitDepth, because it is
-// a real trade between colour fidelity and flicker and belongs to whoever is
-// looking at the panel. Result shows up at /api/status -> refreshHz.
-static const uint8_t PANEL_BIT_DEPTH_DEFAULT = 5;
+// The DMA driver sets all of them to 3, the maximum, and that wrecked WiFi:
+// measured on this board at 16 MHz, ping went from a 3 ms median on
+// Protomatter to 955 ms with 30% loss. The antenna sits a few centimetres from
+// these lines, and the sharpest possible edges put the most energy into the
+// 2.4 GHz band - and this driver clocks continuously, repeating each row up to
+// 32 times a frame, where Protomatter shifted each bit-plane once and held.
+// Softer edges keep the harmonics down without touching the clock.
+//
+// Lower is quieter; too low and the edges get slow enough to shift the wrong
+// bit, which shows as speckled or smeared pixels. Protomatter ran at 2.
+static const uint8_t HUB75_DRIVE = 0;
+
+// 5% of full OE duty. The library floors every bit-plane at one pixel-clock
+// of output, so even the bottom of the slider never goes fully dark.
 static const uint8_t PANEL_BRIGHTNESS_DEFAULT = 5;
 
 // Poll interval default, in seconds. 60 measurably steadies the panel against
 // 30 - every fetch is a TLS handshake, and a desk ticker does not need a price
 // that is fresher than a minute.
 static const uint16_t POLL_SEC_DEFAULT = 60;
-static const uint8_t PANEL_BIT_DEPTH_MIN     = 3;
-static const uint8_t PANEL_BIT_DEPTH_MAX     = 6;
