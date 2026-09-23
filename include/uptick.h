@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.12.1"
+#define UPTICK_VERSION   "0.13.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 8
 
@@ -13,8 +13,8 @@
 
 struct Feed
 {
-  String  source;    // "binance" or "coinbase"; a stock API later
-  String  symbol;    // exchange-native symbol, e.g. "BTCUSDT"
+  String  source;    // "binance", "coinbase", "coingecko" or "yahoo"
+  String  symbol;    // source-native symbol, e.g. "BTCUSDT", "bitcoin", "AAPL"
   String  label;     // what the panel shows, e.g. "BTC"
   String  interval;  // candle width for the chart, e.g. "1h"
   uint8_t decimals;  // price decimals; 0 = pick from magnitude
@@ -43,10 +43,15 @@ extern SemaphoreHandle_t g_cfgMutex;
 // which is not something the render loop should do 30 times a second.
 extern volatile uint32_t g_cfgRev;
 
+// Null-tolerant on purpose. These run during setup() as well as from the
+// tasks, and a handle that has not been created yet would otherwise block
+// forever on a null semaphore - a dark panel and no serial output past the
+// banner. Nothing is concurrent before the tasks are started, so skipping the
+// take there is safe rather than merely convenient.
 struct CfgLock
 {
-  CfgLock()  { xSemaphoreTake(g_cfgMutex, portMAX_DELAY); }
-  ~CfgLock() { xSemaphoreGive(g_cfgMutex); }
+  CfgLock()  { if (g_cfgMutex) xSemaphoreTake(g_cfgMutex, portMAX_DELAY); }
+  ~CfgLock() { if (g_cfgMutex) xSemaphoreGive(g_cfgMutex); }
 };
 
 void   configDefaults(Config& c);
@@ -67,6 +72,13 @@ struct Quote
   float    change24h  = 0;      // fixed 24h window; what the panel prints
   bool     has24h     = false;  // false only when the source could not supply it
   uint16_t count      = 0;
+
+  // Quote currency. The crypto sources are all USD pairs; Yahoo is not, so a
+  // Frankfurt or London listing must not be printed with a "$" in front of it.
+  // A fixed array rather than a String because the render task copies the
+  // whole Quote every frame and must not allocate to do it.
+  char     ccy[8]     = "USD";
+
   float    points[UPTICK_MAX_POINTS];
   float    lo         = 0;
   float    hi         = 0;
@@ -79,8 +91,8 @@ extern SemaphoreHandle_t g_quoteMutex;
 // then take this - so the two locks are never held at once and cannot deadlock.
 struct QuoteLock
 {
-  QuoteLock()  { xSemaphoreTake(g_quoteMutex, portMAX_DELAY); }
-  ~QuoteLock() { xSemaphoreGive(g_quoteMutex); }
+  QuoteLock()  { if (g_quoteMutex) xSemaphoreTake(g_quoteMutex, portMAX_DELAY); }
+  ~QuoteLock() { if (g_quoteMutex) xSemaphoreGive(g_quoteMutex); }
 };
 
 void marketBegin();
@@ -95,6 +107,15 @@ bool marketPaused();
 void   marketSetApiKey(const String& key);
 bool   marketHasApiKey();
 void marketPoll();   // non-blocking-ish; fetches at most one feed per call
+
+// Drops the per-feed attempt timers, which are indexed by position and so are
+// meaningless once the feed list has been reordered or edited.
+void marketConfigChanged();
+
+// Yahoo sends no CORS header, so the web page cannot validate a ticker itself
+// the way it does against the exchange APIs. Blocking, ~1 second; only ever
+// called from the "check" button.
+bool marketProbeYahoo(const String& symbol, float& price, String& name, String& currency);
 
 // ---------------------------------------------------------------- net
 

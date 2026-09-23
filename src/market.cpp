@@ -145,6 +145,117 @@ static int extractField(Stream& s, int wantIdx, float* out, int maxOut)
   return n;
 }
 
+// Yahoo nests the series three arrays deep and returns the quote fields in no
+// fixed order - volume, high, close, open and low have all been observed in
+// different positions - so the index-based extractor above cannot be used on
+// it. This walks the stream once matching two literal keys: the change against
+// the previous close, which arrives early inside "meta", and the close series
+// inside indicators.quote[0]. One request therefore yields the price, the
+// day's move and the chart, with no second lookup.
+static int extractYahoo(Stream& s, float* out, int maxOut, float& pct, bool& hasPct,
+                        char* ccy, size_t ccyLen)
+{
+  static const char KEY_PCT[]   = "\"regularMarketChangePercent\":";
+  static const char KEY_CLOSE[] = "\"close\":[";
+  static const char KEY_CCY[]   = "\"currency\":\"";
+  const uint8_t LEN_PCT   = sizeof(KEY_PCT) - 1;
+  const uint8_t LEN_CLOSE = sizeof(KEY_CLOSE) - 1;
+  const uint8_t LEN_CCY   = sizeof(KEY_CCY) - 1;
+
+  uint8_t mp = 0, mc = 0, mu = 0;  // how much of each key has matched so far
+  bool    inPct = false, inArr = false, inCcy = false;
+  char    buf[24];
+  uint8_t blen = 0;
+  int     n    = 0;
+
+  hasPct = false;
+
+  const uint32_t deadline = millis() + 15000;
+  uint32_t       lastData = millis();
+
+  auto isNum = [](char c)
+  {
+    return isdigit((unsigned char)c) || c == '-' || c == '+' || c == '.' ||
+           c == 'e' || c == 'E';
+  };
+
+  // Keeps the newest maxOut values. A wide range comes back with several
+  // hundred bars and the recent end is the one that reaches the panel.
+  auto push = [&](float v)
+  {
+    if (n < maxOut)
+    {
+      out[n] = v;
+    }
+    else
+    {
+      memmove(out, out + 1, sizeof(float) * (maxOut - 1));
+      out[maxOut - 1] = v;
+    }
+    n++;
+  };
+
+  while (millis() < deadline)
+  {
+    if (!s.available())
+    {
+      if (millis() - lastData > 3000) break;
+      delay(5);
+      continue;
+    }
+
+    lastData = millis();
+    char c   = (char)s.read();
+
+    if (inPct)
+    {
+      if (isNum(c) && blen < sizeof(buf) - 1) { buf[blen++] = c; continue; }
+
+      // Guarded on blen because the field can come back null, and an empty
+      // buffer would otherwise be reported as a confident 0.00%.
+      buf[blen] = 0;
+      if (blen) { pct = atof(buf); hasPct = true; }
+      inPct = false;
+      blen  = 0;
+      // Falls through: this character still has to reach the matchers.
+    }
+
+    if (inCcy)
+    {
+      // Not every listing is priced in dollars - a Frankfurt line quotes EUR,
+      // a London one quotes pence - and the panel must not print "$" over it.
+      if (c != '"' && blen < ccyLen - 1 && blen < sizeof(buf) - 1) { buf[blen++] = c; continue; }
+      buf[blen] = 0;
+      if (blen) { strncpy(ccy, buf, ccyLen - 1); ccy[ccyLen - 1] = 0; }
+      inCcy = false;
+      blen  = 0;
+      continue;
+    }
+
+    if (inArr)
+    {
+      if (isNum(c) && blen < sizeof(buf) - 1) { buf[blen++] = c; continue; }
+
+      // A bar with no trade comes back as null, which captures nothing. Those
+      // are dropped rather than interpolated - one column fewer is closer to
+      // the truth than a price that never existed.
+      if (blen) { buf[blen] = 0; push(atof(buf)); blen = 0; }
+
+      if (c == ']') return n;      // end of the close array; nothing after it is wanted
+      continue;
+    }
+
+    mp = (c == KEY_PCT[mp])   ? mp + 1 : (c == KEY_PCT[0]   ? 1 : 0);
+    mc = (c == KEY_CLOSE[mc]) ? mc + 1 : (c == KEY_CLOSE[0] ? 1 : 0);
+    mu = (c == KEY_CCY[mu])   ? mu + 1 : (c == KEY_CCY[0]   ? 1 : 0);
+
+    if (mp == LEN_PCT)   { mp = 0; inPct = true; blen = 0; }
+    if (mc == LEN_CLOSE) { mc = 0; inArr = true; blen = 0; }
+    if (mu == LEN_CCY)   { mu = 0; inCcy = true; blen = 0; }
+  }
+  return n;
+}
+
 // ---------------------------------------------------------------- adapters
 
 // CoinGecko does not take a candle size - it picks granularity from the range
@@ -157,6 +268,53 @@ static uint16_t coingeckoDays(const String& interval)
   if (interval == "5m" || interval == "15m") return 1;    // 5-minutely
   if (interval == "1h" || interval == "4h")  return 3;    // hourly
   return 365;                                             // daily
+}
+
+// Yahoo takes a range and a bar width as two separate parameters, and only
+// serves intraday bars over short ranges. Each range here is chosen to return
+// at least the 64 bars the panel has columns for - anything beyond that is
+// trimmed to the newest 64 by the parser.
+//
+// There is no 4h bar, so it rounds to daily, the same compromise Coinbase
+// forces by rounding 4h up to 6h.
+static const char* yahooRange(const String& interval)
+{
+  if (interval == "5m")  return "1d";
+  if (interval == "15m") return "5d";
+  if (interval == "1h")  return "1mo";
+  return "3mo";                                   // 4h and 1d
+}
+
+static const char* yahooInterval(const String& interval)
+{
+  if (interval == "5m")  return "5m";
+  if (interval == "15m") return "15m";
+  if (interval == "1h")  return "60m";
+  return "1d";                                    // 4h and 1d
+}
+
+// Tickers carry characters that are not legal unencoded in a path: "^GSPC" for
+// an index, "EURUSD=X" for a pair. Yahoo accepts either form, so everything
+// outside the unreserved set is encoded rather than reasoned about.
+static String urlEncodePath(const String& s)
+{
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++)
+  {
+    const char c = s[i];
+    if (isalnum((unsigned char)c) || c == '-' || c == '.' || c == '_' || c == '~')
+    {
+      out += c;
+    }
+    else
+    {
+      char esc[4];
+      snprintf(esc, sizeof(esc), "%%%02X", (unsigned char)c);
+      out += esc;
+    }
+  }
+  return out;
 }
 
 static uint32_t coinbaseGranularity(const String& interval)
@@ -177,6 +335,11 @@ static uint32_t feedBarSeconds(const Feed& f)
 {
   if (f.source == "coinbase") return coinbaseGranularity(f.interval);
 
+  // Yahoo has no 4h bar; both 4h and 1d come back daily.
+  if (f.source == "yahoo")
+    return (f.interval == "5m") ? 300 : (f.interval == "15m") ? 900
+         : (f.interval == "1h") ? 3600 : 86400;
+
   if (f.source == "coingecko")
   {
     // Granularity follows the range: 1 day is 5-minutely, up to 90 is hourly,
@@ -195,6 +358,16 @@ static uint32_t feedBarSeconds(const Feed& f)
 
 static String buildUrl(const Feed& f)
 {
+  if (f.source == "yahoo")
+  {
+    // Symbol is the Yahoo ticker, which is not only stocks: "AAPL", "SPY",
+    // "^GSPC", "EURUSD=X", "GC=F" and "SAP.DE" all resolve through the same
+    // endpoint with the same fields.
+    return "https://query1.finance.yahoo.com/v8/finance/chart/" + urlEncodePath(f.symbol) +
+           "?range="     + String(yahooRange(f.interval)) +
+           "&interval="  + String(yahooInterval(f.interval));
+  }
+
   if (f.source == "coingecko")
   {
     // Symbol is the CoinGecko coin id here - "bitcoin", not "BTCUSDT".
@@ -292,6 +465,52 @@ static bool fetch24h(const Feed& f, float& pct)
   return true;
 }
 
+// Unlike the three exchange APIs, Yahoo sends no Access-Control-Allow-Origin,
+// so the web page cannot check a ticker from the browser the way it does for
+// the others - the device has to fetch it on the page's behalf. One TLS
+// handshake per click of "check", which is a manual action and rare.
+bool marketProbeYahoo(const String& symbol, float& price, String& name, String& currency)
+{
+  WiFiClientSecure client;
+  HTTPClient       https;
+  prepareClient(client, https);
+
+  // The narrowest range there is: nothing here needs the series, only meta.
+  const String url = "https://query1.finance.yahoo.com/v8/finance/chart/" +
+                     urlEncodePath(symbol) + "?range=1d&interval=1d";
+
+  if (!https.begin(client, url)) return false;
+
+  if (https.GET() != HTTP_CODE_OK)   // 404 is how an unknown ticker answers
+  {
+    https.end();
+    return false;
+  }
+
+  // An array in a filter applies its single element to every entry, so this
+  // selects meta out of result[0] without ArduinoJson having to hold the
+  // timestamp and close arrays at the same time as an open TLS session.
+  JsonDocument filter;
+  JsonObject   meta = filter["chart"]["result"][0]["meta"].to<JsonObject>();
+  meta["regularMarketPrice"] = true;
+  meta["shortName"]          = true;
+  meta["currency"]           = true;
+
+  JsonDocument doc;
+  DeserializationError e = deserializeJson(doc, https.getStream(),
+                                           DeserializationOption::Filter(filter));
+  https.end();
+  if (e) return false;
+
+  JsonVariantConst m = doc["chart"]["result"][0]["meta"];
+  if (m["regularMarketPrice"].isNull()) return false;
+
+  price    = m["regularMarketPrice"].as<float>();
+  name     = m["shortName"] | "";
+  currency = m["currency"]  | "";
+  return true;
+}
+
 static bool fetchFeed(const Feed& f, Quote& q)
 {
   WiFiClientSecure client;
@@ -313,12 +532,26 @@ static bool fetchFeed(const Feed& f, Quote& q)
     return false;
   }
 
-  // Binance klines and Coinbase candles both put the close at index 4.
-  // CoinGecko's market_chart is [[timestamp, price], ...], so index 1.
-  const int closeIdx = (f.source == "coingecko") ? 1 : 4;
+  const bool yahoo = (f.source == "yahoo");
 
   float raw[UPTICK_MAX_POINTS];
-  int   n = extractField(https.getStream(), closeIdx, raw, UPTICK_MAX_POINTS);
+  float dayPct  = 0.0f;
+  bool  haveDay = false;
+  char  ccy[8]  = "USD";        // the crypto sources are all USD pairs
+  int   n;
+
+  if (yahoo)
+  {
+    n = extractYahoo(https.getStream(), raw, UPTICK_MAX_POINTS, dayPct, haveDay,
+                     ccy, sizeof(ccy));
+  }
+  else
+  {
+    // Binance klines and Coinbase candles both put the close at index 4.
+    // CoinGecko's market_chart is [[timestamp, price], ...], so index 1.
+    n = extractField(https.getStream(), (f.source == "coingecko") ? 1 : 4,
+                     raw, UPTICK_MAX_POINTS);
+  }
   https.end();
 
   if (n > UPTICK_MAX_POINTS) n = UPTICK_MAX_POINTS;   // flush kept the newest
@@ -355,20 +588,33 @@ static bool fetchFeed(const Feed& f, Quote& q)
   float change24h = 0.0f;
   bool  has24h    = false;
 
-  const uint32_t bars = 86400UL / feedBarSeconds(f);
-  if (bars >= 1 && (int)bars < n)
+  if (yahoo)
   {
-    const float ref = raw[n - 1 - bars];
-    if (ref > 0.0f)
-    {
-      change24h = (raw[n - 1] - ref) / ref * 100.0f;
-      has24h    = true;
-    }
+    // A rolling 24h window is meaningless for something that trades 6.5 hours
+    // a day: the honest equivalent is the move against the previous close,
+    // which is also the number every quote page prints. Yahoo supplies it in
+    // the response already parsed above, so there is no second request.
+    change24h = dayPct;
+    has24h    = haveDay;
+    if (!has24h) Serial.printf("[mkt] %s: no change field\n", f.symbol.c_str());
   }
   else
   {
-    has24h = fetch24h(f, change24h);
-    if (!has24h) Serial.printf("[mkt] %s: 24h lookup failed\n", f.symbol.c_str());
+    const uint32_t bars = 86400UL / feedBarSeconds(f);
+    if (bars >= 1 && (int)bars < n)
+    {
+      const float ref = raw[n - 1 - bars];
+      if (ref > 0.0f)
+      {
+        change24h = (raw[n - 1] - ref) / ref * 100.0f;
+        has24h    = true;
+      }
+    }
+    else
+    {
+      has24h = fetch24h(f, change24h);
+      if (!has24h) Serial.printf("[mkt] %s: 24h lookup failed\n", f.symbol.c_str());
+    }
   }
 
   {
@@ -378,6 +624,8 @@ static bool fetchFeed(const Feed& f, Quote& q)
     q.lo    = lo;
     q.hi    = hi;
     q.price = raw[n - 1];
+    strncpy(q.ccy, ccy, sizeof(q.ccy) - 1);
+    q.ccy[sizeof(q.ccy) - 1] = 0;
 
     // Always computed, because it is free and because it is what the chart
     // actually shows. The 24h figure is optional and sits alongside it.
@@ -400,6 +648,16 @@ static bool fetchFeed(const Feed& f, Quote& q)
 }
 
 // ---------------------------------------------------------------- lifecycle
+
+// Called when the feed list changes. The attempt timers are indexed by feed
+// position, so after a reorder they describe whoever used to hold that slot.
+// Clearing them makes every feed due, and display-gated polling then refreshes
+// each one as its turn comes round rather than all at once.
+void marketConfigChanged()
+{
+  for (uint8_t i = 0; i < UPTICK_MAX_FEEDS; i++) s_lastAttemptMs[i] = 0;
+  s_lastAnyFetchMs = 0;
+}
 
 void marketBegin()
 {

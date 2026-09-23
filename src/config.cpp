@@ -114,11 +114,70 @@ bool configFromJson(const String& body, String& err)
     c.feeds[c.feedCount++] = f;
   }
 
+  // Quotes are indexed by feed position, so reordering or deleting a feed
+  // would otherwise leave the previous occupant's price sitting under the new
+  // feed's label until the next fetch - BTC's number under ETH's name. Each
+  // quote is carried across to wherever its feed moved to, matched on source
+  // and symbol; anything unmatched starts empty and refetches on its turn.
+  //
+  // Bracketed by displayPause because the config and the quotes are behind
+  // separate mutexes that must never be held together, so there is no way to
+  // swap both atomically - pausing means no frame can observe the moment they
+  // disagree. Note this must be released before configSave(), which pauses
+  // again and would deadlock on a non-recursive mutex.
+  //
+  // The scratch copy is heap-allocated: Quote is ~300 bytes and eight of them
+  // would be a third of the network task's 8 KB stack.
+  Quote* prev = (Quote*)malloc(sizeof(Quote) * UPTICK_MAX_FEEDS);
+
+  displayPause();
   {
-    CfgLock lk;
-    g_cfg = c;
-    g_cfgRev++;
+    String  prevSrc[UPTICK_MAX_FEEDS], prevSym[UPTICK_MAX_FEEDS];
+    uint8_t prevCount;
+
+    {
+      CfgLock lk;
+      prevCount = g_cfg.feedCount;
+      for (uint8_t i = 0; i < prevCount; i++)
+      {
+        prevSrc[i] = g_cfg.feeds[i].source;
+        prevSym[i] = g_cfg.feeds[i].symbol;
+      }
+      g_cfg = c;
+      g_cfgRev++;
+    }
+
+    {
+      QuoteLock lk;
+      if (prev)
+      {
+        for (uint8_t i = 0; i < UPTICK_MAX_FEEDS; i++) prev[i] = g_quotes[i];
+        for (uint8_t i = 0; i < UPTICK_MAX_FEEDS; i++) g_quotes[i] = Quote();
+
+        for (uint8_t i = 0; i < c.feedCount; i++)
+          for (uint8_t j = 0; j < prevCount; j++)
+            if (prevSrc[j] == c.feeds[i].source && prevSym[j] == c.feeds[i].symbol)
+            {
+              g_quotes[i] = prev[j];
+              break;
+            }
+      }
+      else
+      {
+        // Out of memory is not a reason to show a wrong price. Clearing costs
+        // one refetch per feed and is always truthful.
+        for (uint8_t i = 0; i < UPTICK_MAX_FEEDS; i++) g_quotes[i] = Quote();
+      }
+    }
   }
+  displayResume();
+
+  free(prev);
+
+  // The poller indexes its attempt timers by position too, so they are reset
+  // rather than carried: the worst case is one early refetch, against a feed
+  // that never comes due because it inherited a recent timestamp.
+  marketConfigChanged();
 
   // Applied to RAM regardless - the panel and the poller pick it up either
   // way. Only persistence can fail here, and saying so is the difference

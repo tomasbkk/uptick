@@ -83,7 +83,25 @@ Settings are a single JSON document at `/config.json` on LittleFS, with a `schem
 
 Factory feeds are BTC, ETH, SOL and ZEC on Binance. `decimals: 0` means "pick from magnitude" - whole dollars above $1000, cents below, four places under $1.
 
-The `source` field is the extension point: `binance`, `coinbase` and `coingecko` today, each behind its own fetch adapter. The renderer never learns where the numbers came from.
+The `source` field is the extension point: `binance`, `coinbase` and `coingecko` for crypto and `yahoo` for stocks and everything else Yahoo Finance lists, each behind its own fetch adapter. The renderer never learns where the numbers came from.
+
+### Ordering feeds
+
+The rotation follows the order of the `feeds` array, so reordering is an array move and nothing else. The web UI offers both a drag grip and up/down arrows; like every other feed edit, the new order is held until Save.
+
+The device does not apply it mid-dwell. When the config arrives, the renderer looks up the feed that is currently on screen and follows it to its new index, so the panel keeps showing the same thing until its turn is up and the new order starts from the next rotation. A feed that was deleted outright falls through to the index clamp and the next swap picks up the new order regardless.
+
+Quotes are indexed by feed position, so `configFromJson` carries each quote across to wherever its feed moved, matched on source and symbol; anything unmatched starts empty and refetches on its turn. Without that a reorder would print the previous occupant's price under the new feed's label until the next fetch. The same applies to adding and deleting, which had the bug before reordering existed. The poller's attempt timers are indexed by position too, and are simply reset - the worst case is one early refetch.
+
+### Backing feeds up
+
+**`pio run -t uploadfs` erases the saved config.** It rewrites the whole `spiffs` partition from `data/`, and `/config.json` lives in that partition, so every filesystem upload takes the feed list with it. Firmware uploads do not: `pio run -t upload` writes only `app0` at `0x10000` and leaves the filesystem alone. Only run `uploadfs` when something under `data/` actually changed.
+
+**Export** and **Import** in the Feeds card exist for the times you do. Export downloads `uptick-feeds.json`; import reads it back, validates it and loads it into the form, and the feeds are stored when you press Save. The order that matters is export, then `uploadfs`, then import.
+
+Both run entirely in the browser - the page already holds the config, so no endpoint is involved, and exporting captures what is on screen including edits that have not been saved yet. Import accepts three shapes, because all three turn up: an export file, a whole `/api/config` document, or a bare array of feeds. Anything unknown is normalised rather than trusted - an unrecognised `source` falls back to `binance`, an unrecognised `interval` to `1h`, `decimals` is clamped to 0-8 - and a file that fails validation leaves the feeds on screen untouched.
+
+`interval` is the chart candle width, not the poll rate. 64 candles fill the panel's 64 columns, so it sets how far back the chart reaches. Yahoo has no 4h bar, so `4h` rounds to daily there - the same compromise Coinbase forces by rounding it up to 6h.
 
 ### REST API
 
@@ -97,6 +115,7 @@ The `source` field is the extension point: `binance`, `coinbase` and `coingecko`
 | POST | `/api/defaults` | restore factory settings, leaving WiFi alone |
 | POST | `/api/apikey` | store the CoinGecko key (write-only) |
 | POST | `/api/fetch` | pause or resume market polling |
+| GET | `/api/check?symbol=` | validate a Yahoo ticker on the page's behalf (Yahoo sends no CORS header) |
 | POST | `/api/wifisleep` | toggle WiFi power save |
 | POST | `/api/stats` | reset the refresh stability counters |
 | GET | `/api/files` | list LittleFS contents |
@@ -112,7 +131,11 @@ Core 0 runs the radio, the web server and the market fetch. Core 1 runs the disp
 
 `Config` holds `String` members, so copying it deep-copies around forty strings. Both the render loop and the poll loop run far too often to do that per iteration, so `g_cfgRev` is bumped on every change and each reader caches its own copy until the revision moves.
 
-The two mutexes (`CfgLock`, `QuoteLock`) are never held at the same time. Both readers copy config, release, then take the quote lock, so there is no lock ordering to get wrong.
+The two mutexes (`CfgLock`, `QuoteLock`) are never held at the same time. Both readers copy config, release, then take the quote lock, so there is no lock ordering to get wrong. Where both have to move together - the quote remap on a config change - `displayPause()` brackets the pair instead, so no frame can observe the moment they disagree. That bracket must be released before `configSave()`, which pauses again and would deadlock on a non-recursive mutex.
+
+Both guards tolerate a null handle. `configBegin()` loads the stored config through the same path a POST takes, so it takes the quote lock during `setup()` - and it used to run before `marketBegin()` created that mutex, which meant `xSemaphoreTake(nullptr, portMAX_DELAY)` and a boot that hung with the panel dark and nothing on serial past the banner. `marketBegin()` now runs first, and the null check means the same mistake degrades into working code rather than a brick.
+
+Recovering from a hang like that is worth knowing: the S3's native USB ignores the RTS reset, so `esptool` cannot auto-enter the bootloader once the app stops servicing USB, and reports `Write timeout`. Hold BOOT, tap RESET, release BOOT to enter it by hand; flash; then press RESET, because `--after hard_reset` does not work over native USB either.
 
 The web UI is read off LittleFS once at boot and served from a buffer in internal RAM. This is a correctness fix, not an optimisation - see the flicker notes below.
 
@@ -128,9 +151,32 @@ https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=64
 
 CoinGecko is supported for coins the exchanges do not list. Its symbol is the coin id (`bitcoin`, not `BTCUSDT`), it needs a demo API key, and it chooses its own granularity from the range requested rather than taking a candle size. Its free tier allows roughly 10k calls a month, so it suits slow polling only.
 
+### Stocks, via Yahoo Finance
+
+```
+https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1mo&interval=60m
+```
+
+Yahoo's chart endpoint was chosen because it is the only stock source still usable without a key or a subscription. One request returns the price, the change against the previous close and the candle series together, and a 404 is how it answers an unknown ticker, so validation needs nothing extra.
+
+It is not only stocks. The same endpoint and the same three fields cover ETFs (`SPY`), indices (`^GSPC`), futures (`GC=F`), currency pairs (`EURUSD=X`) and non-US listings (`SAP.DE`, `VOD.L`). Tickers are percent-encoded, since `^` is not legal unencoded in a path.
+
+Two things to know about it:
+
+- **It is unofficial.** There is no contract and no support. If it changes shape, the adapter breaks. Yahoo also rejects a `curl/*` User-Agent with a 429 - `uptick/<version>` passes, but that is the sort of filter that can tighten without notice.
+- **It sends no CORS header**, unlike all three crypto APIs. The web page cannot check a ticker from the browser, so those checks go through `/api/check` on the device instead. One TLS handshake per click, and only when the button is pressed.
+
+Not every listing is priced in dollars, so the quote currency is read from the same response and carried on the `Quote`. The panel prints `$` only when the currency really is USD - a Frankfurt or London line prints bare, since the 5x7 font has no glyph for those and a wrong symbol is worse than none. The crypto sources are all USD pairs and are unaffected.
+
+Alternatives were measured rather than assumed. Stooq now gates its CSV behind a JavaScript proof-of-work challenge, which an ESP32 cannot solve. Alpha Vantage, Finnhub, Twelve Data, marketstack, FMP, Tiingo and Polygon all require a key. IEX Cloud is gone. MarketData.app is keyless only for AAPL.
+
+### Parsing
+
 Candle responses are parsed by a hand-rolled streaming scanner (`extractField`) rather than ArduinoJson. ArduinoJson filters cannot select by index inside an array, so filtering could not isolate the close, and buffering the whole document would mean holding hundreds of fields of JSON in RAM at the same moment a TLS session is open. The scanner pulls one field straight off the socket with no allocation, handles both quoted strings and bare numbers, and keeps the *last* 64 values rather than the first - CoinGecko returns far more points than asked for and the recent end is the interesting one.
 
 The 24h endpoints are objects rather than arrays, so ArduinoJson key filtering works there and is used.
+
+Yahoo needs a second scanner (`extractYahoo`). Its series sits three arrays deep and its quote fields come back in no fixed order - `volume`, `high`, `close`, `open` and `low` have each been observed in different positions - so index-based extraction does not work on it. That scanner walks the stream once matching two literal keys, `"regularMarketChangePercent":` from `meta` and `"close":[` from `indicators.quote[0]`, and gets both the day's move and the chart out of a single pass. Bars that come back `null` are dropped rather than interpolated, and an unterminated trailing number on a truncated response is discarded rather than committed, since `13` may be the first two digits of `137.5`.
 
 ### Polling schedule
 
@@ -165,6 +211,8 @@ The chart scales to the min/max of the visible window, never to zero, or intrada
 The chart span is per-feed and adjustable; the percentage is always the fixed 24 hour change, so it stays comparable between feeds whose charts cover different spans. The two disagree routinely - a coin can be flat over a day and up 8% over a 64 hour chart - so the percentage is tinted by the percentage and the chart by the chart. Colouring a visibly falling line green to match a positive 24h figure would be a lie.
 
 At `1h` candles the 24h figure comes free from the candles already fetched, 24 bars back. Only `5m` and `15m` feeds trigger a second request, since 64 of those candles do not span a day.
+
+For a Yahoo feed it is the move against the previous close, not a rolling 24 hours. A rolling window is meaningless for something that trades 6.5 hours a day, and the previous close is the number every quote page prints. Yahoo supplies it in the same response, so no second request is ever needed. Outside market hours the price holds at the last close and the figure stops moving - that is correct, not a stalled fetch, and the stale indicator stays off because it tracks fetch failures rather than data age.
 
 ### Palette
 

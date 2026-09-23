@@ -2,3 +2,6 @@
 .vscode/
 .DS_Store
 *.bin
+
+# Feed exports from the web UI - personal configuration, not source.
+uptick-feeds*.json

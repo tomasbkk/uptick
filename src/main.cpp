@@ -15,8 +15,12 @@ void setup()
     Serial.println("[fs] mount failed - config will not persist");
   }
 
-  configBegin();
+  // marketBegin first: it creates the quote mutex, and configBegin loads the
+  // stored config through the same path a POST takes - which remaps quotes and
+  // therefore takes that mutex. The other way round it takes a null handle and
+  // the boot hangs with the panel dark.
   marketBegin();
+  configBegin();
 
   // Before netBegin, so the boot splash is up during the join rather than the
   // panel sitting dark for twenty seconds. A panel failure is not fatal: the

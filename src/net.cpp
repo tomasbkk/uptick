@@ -216,6 +216,39 @@ static void handleApiKey()
   sendOk();
 }
 
+// Ticker validation on the page's behalf. Only yahoo feeds come through here:
+// the three exchange APIs all send CORS headers, so the browser checks those
+// itself and the device never sees them.
+static void handleCheck()
+{
+  const String symbol = http.arg("symbol");
+  if (symbol.isEmpty()) { sendErr(400, "no symbol"); return; }
+
+  if (g_net.apMode || WiFi.status() != WL_CONNECTED)
+  {
+    sendErr(503, "not on a network yet");
+    return;
+  }
+
+  float  price = 0;
+  String name, currency;
+  if (!marketProbeYahoo(symbol, price, name, currency))
+  {
+    sendErr(404, "no such symbol");
+    return;
+  }
+
+  JsonDocument d;
+  d["ok"]       = true;
+  d["price"]    = price;
+  d["name"]     = name;
+  d["currency"] = currency;
+
+  String out;
+  serializeJson(d, out);
+  sendJson(200, out);
+}
+
 // Two live switches for isolating what disturbs the panel. Neither persists.
 //
 // Fetching is the loud one: four feeds at 30 second polling means a full TLS
@@ -540,6 +573,7 @@ void netBegin()
   http.on("/api/defaults",   HTTP_POST, handleDefaults);
   http.on("/api/apikey",     HTTP_POST, handleApiKey);
   http.on("/api/fetch",      HTTP_POST, handleFetch);
+  http.on("/api/check",      HTTP_GET,  handleCheck);
   http.on("/api/stats",      HTTP_POST, [](){ displayResetStats(); sendOk(); });
   http.on("/api/palette",    HTTP_GET,  handlePaletteGet);
   http.on("/api/palette",    HTTP_POST, handlePalettePost);

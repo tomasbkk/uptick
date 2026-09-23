@@ -250,7 +250,16 @@ static void addThousands(char* s, size_t cap)
   }
 }
 
-static void formatPrice(char* out, size_t n, float p, uint8_t decimals)
+// "$" only when the quote really is in dollars. A Yahoo feed can come back in
+// EUR or in pence, and the 5x7 font has no glyph for those anyway, so anything
+// else is printed bare rather than mislabelled. The crypto sources are all USD
+// pairs, so they are unaffected.
+static const char* ccyPrefix(const Quote& q)
+{
+  return strcmp(q.ccy, "USD") == 0 ? "$" : "";
+}
+
+static void formatPrice(char* out, size_t n, float p, uint8_t decimals, const char* cur)
 {
   uint8_t d = decimals;
   if (d == 0)
@@ -259,29 +268,30 @@ static void formatPrice(char* out, size_t n, float p, uint8_t decimals)
     else if (p >= 1.0f)    d = 2;
     else                   d = 4;
   }
-  snprintf(out, n, "$%.*f", d, p);
+  snprintf(out, n, "%s%.*f", cur, d, p);
   addThousands(out, n);
 }
 
-static void formatPriceShort(char* out, size_t n, float p)
+static void formatPriceShort(char* out, size_t n, float p, const char* cur)
 {
-  if      (p >= 1000000.0f) snprintf(out, n, "$%.2fM", p / 1000000.0f);
-  else if (p >= 1000.0f)    snprintf(out, n, "$%.1fK", p / 1000.0f);
-  else                      snprintf(out, n, "$%.2f",  p);
+  if      (p >= 1000000.0f) snprintf(out, n, "%s%.2fM", cur, p / 1000000.0f);
+  else if (p >= 1000.0f)    snprintf(out, n, "%s%.1fK", cur, p / 1000.0f);
+  else                      snprintf(out, n, "%s%.2f",  cur, p);
 }
 
 // Ladder: full precision in the readable font, then the small font, then
 // abbreviate. "$214,460.00" is 66 px in the 5x7 font - one pixel too wide for
 // the panel - so this is the difference between a price and a truncated price.
-static void drawPriceLine(int16_t yTop, float price, uint8_t decimals, uint16_t c)
+static void drawPriceLine(int16_t yTop, float price, uint8_t decimals, uint16_t c,
+                          const char* cur)
 {
   char buf[24];
-  formatPrice(buf, sizeof(buf), price, decimals);
+  formatPrice(buf, sizeof(buf), price, decimals, cur);
 
   if (bigWidth(buf) <= PANEL_W)  { drawBig(0, yTop, buf, c); return; }
   if (tinyWidth(buf) <= PANEL_W) { drawTiny(0, yTop + 1, buf, c); return; }
 
-  formatPriceShort(buf, sizeof(buf), price);
+  formatPriceShort(buf, sizeof(buf), price, cur);
   if (bigWidth(buf) <= PANEL_W) drawBig(0, yTop, buf, c);
   else                          drawTiny(0, yTop + 1, buf, c);
 }
@@ -412,7 +422,7 @@ static void drawSingleChart(const Config& cfg, const Feed& f, const Quote& q, bo
   }
 
   // Rows 8-14: price. Row 7 is left blank so the two lines do not touch.
-  drawPriceLine(8, q.price, f.decimals, C_PRICE());
+  drawPriceLine(8, q.price, f.decimals, C_PRICE(), ccyPrefix(q));
 
   // Rows 16-31: chart. Dark fill, lighter trace along its top edge.
   drawChart(q, 16, PANEL_H - 1,
@@ -481,9 +491,9 @@ static void drawMultiPrice(const Config& cfg)
     }
 
     char buf[20];
-    formatPrice(buf, sizeof(buf), q.price, cfg.feeds[i].decimals);
+    formatPrice(buf, sizeof(buf), q.price, cfg.feeds[i].decimals, ccyPrefix(q));
     if (tinyWidth(buf) > PANEL_W - tinyWidth(cfg.feeds[i].label.c_str()) - 3)
-      formatPriceShort(buf, sizeof(buf), q.price);
+      formatPriceShort(buf, sizeof(buf), q.price, ccyPrefix(q));
 
     drawTiny(PANEL_W - tinyWidth(buf), y, buf,
              displayChange(q) >= 0.0f ? C_PCT_UP() : C_PCT_DOWN());
@@ -579,9 +589,29 @@ void displayTask(void* arg)
     static uint32_t seenRev = 0;
     if (seenRev != g_cfgRev)
     {
-      CfgLock lk;
-      cfg     = g_cfg;
-      seenRev = g_cfgRev;
+      // A reorder must not change what is on screen halfway through a dwell,
+      // so the feed showing now is followed to wherever it moved to and keeps
+      // its turn. The new order takes effect from the next swap onward, which
+      // is also when the dwell timer would have fired anyway.
+      //
+      // If that feed was deleted outright the index is clamped below and the
+      // next swap picks up the new order regardless.
+      const String curSrc = (feedIdx < cfg.feedCount) ? cfg.feeds[feedIdx].source : String();
+      const String curSym = (feedIdx < cfg.feedCount) ? cfg.feeds[feedIdx].symbol : String();
+
+      {
+        CfgLock lk;
+        cfg     = g_cfg;
+        seenRev = g_cfgRev;
+      }
+
+      if (curSym.length())
+        for (uint8_t i = 0; i < cfg.feedCount; i++)
+          if (cfg.feeds[i].source == curSrc && cfg.feeds[i].symbol == curSym)
+          {
+            feedIdx = i;
+            break;
+          }
     }
 
     s_brightness = cfg.brightness;
