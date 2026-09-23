@@ -83,6 +83,8 @@ Settings are a single JSON document at `/config.json` on LittleFS, with a `schem
 
 `mode` is `single_chart`, `ticker` (horizontal) or `ticker_vertical`. `ticker_vertical` was called `multi_price` before it scrolled; a config or backup that still says so is translated on load rather than refused, since refusing the stored config at boot would throw the whole document away, feeds included. Keys the firmware no longer uses - `bitDepth`, and `tz`, which was stored but never applied to anything - are ignored for the same reason. Up to 32 feeds (`UPTICK_MAX_FEEDS`); the web page reads the limit from `/api/status` rather than repeating it.
 
+A label left blank is made from the symbol. Binance and Coinbase symbols carry their quote currency, which only costs width on a 64 px panel when it is a dollar, so `USDT`, `USDC`, `FDUSD`, `BUSD`, `TUSD` and `USD` quotes are dropped - BTCUSDT and BTC-USD both become BTC. Any other quote stays, since "ETH" over a price in bitcoin would misrepresent it, so ETHBTC stays ETHBTC. Stock symbols and CoinGecko ids are used as they are. The web page does this before saving and previews it in the label box as the symbol is typed; `config.cpp` does the same for a config POSTed without labels.
+
 Factory feeds are BTC, ETH, SOL and ZEC on Binance. `decimals: 0` means "pick from magnitude" - whole dollars above $1000, cents below, four places under $1.
 
 The `source` field is the extension point: `binance`, `coinbase` and `coingecko` for crypto and `yahoo` for stocks and everything else Yahoo Finance lists, each behind its own fetch adapter. The renderer never learns where the numbers came from.
@@ -265,6 +267,8 @@ rows 16-31   TSLA ▲0.44%  SPCX ▼1.58%  EOSE ▲        second half
 
 The first half of the feed list runs along the top and the second half along the bottom, with the odd one out on top, so reordering the feeds is how to choose which section a feed is in - crypto above and stocks below, say. A single feed gets one section, centred. The change sits behind a triangle coloured by direction; CP437 `0x1E` and `0x1F` in the built-in font are solid up and down triangles. There is no currency symbol: a tape is read as figures, and a prefix would only be right for the feeds priced in dollars.
 
+Row 15, the blank row between the sections, carries a dark grey divider in the `DIVIDER` palette colour. Being in the blank row, it touches neither section's text.
+
 A block is only as wide as its longer line, which makes it around 40% narrower than the same entry on one line, so more of them pass at the same speed.
 
 An entry's text is frozen when it enters at the right edge. A price that changed mid-crawl would change the block's width while it moved and shunt everything behind it, so the next pass carries the new figure instead - which is how a real tape behaves. Each section holds only the entries in view, retiring them as they leave on the left and taking the next feed as soon as there is room behind the last.
@@ -295,7 +299,7 @@ For a Yahoo feed it is the move against the previous close, not a rolling 24 hou
 
 ### Palette
 
-Eleven named colours, all overridable live through `/api/palette` and the web UI's colour pickers: `LABEL`, `PRICE`, `PCT_UP`, `PCT_DOWN`, `FILL_UP`, `TRACE_UP`, `FILL_DOWN`, `TRACE_DOWN`, `DIM`, `ACCENT`, `STALE`.
+Twelve named colours, all overridable live through `/api/palette` and the web UI's colour pickers: `LABEL`, `PRICE`, `PCT_UP`, `PCT_DOWN`, `FILL_UP`, `TRACE_UP`, `FILL_DOWN`, `TRACE_DOWN`, `DIM`, `ACCENT`, `STALE`, `DIVIDER`. `DIVIDER` is the line between the horizontal ticker's sections; set to black it disappears.
 
 Overrides are RAM-only. The web page remembers picks in local storage and can export them as a `PAL_FACTORY` table to paste back into `display.cpp`.
 

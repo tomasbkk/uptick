@@ -40,6 +40,42 @@ static void feedToJson(const Feed& f, JsonObject o)
   o["decimals"] = f.decimals;
 }
 
+// The label a feed gets when none is given. Binance and Coinbase symbols carry
+// their quote currency - BTCUSDT, BTC-USD - which only costs width on a 64 px
+// panel when it is a dollar, so a dollar quote is dropped; any other quote
+// stays, since "ETH" over a price in bitcoin would misrepresent it. Stock
+// symbols and CoinGecko ids are used as they are.
+//
+// Mirrors autoLabel() in the web page, which fills labels before it saves.
+// This copy covers a config POSTed to /api/config directly.
+static String autoLabel(const Feed& f)
+{
+  static const char* const USD_QUOTES[] = { "FDUSD", "USDT", "USDC", "BUSD", "TUSD", "USD" };
+
+  if (f.source == "binance")
+  {
+    for (const char* q : USD_QUOTES)
+    {
+      const unsigned n = strlen(q);
+      if (f.symbol.length() > n && f.symbol.endsWith(q))
+        return f.symbol.substring(0, f.symbol.length() - n);
+    }
+  }
+
+  if (f.source == "coinbase")
+  {
+    const int dash = f.symbol.indexOf('-');
+    if (dash > 0)
+    {
+      const String quote = f.symbol.substring(dash + 1);
+      for (const char* q : USD_QUOTES)
+        if (quote == q) return f.symbol.substring(0, dash);
+    }
+  }
+
+  return f.symbol;
+}
+
 static void feedFromJson(JsonObjectConst o, Feed& f)
 {
   f.source   = o["source"]   | "binance";
@@ -47,7 +83,7 @@ static void feedFromJson(JsonObjectConst o, Feed& f)
   f.label    = o["label"]    | "";
   f.interval = o["interval"] | "1h";
   f.decimals = o["decimals"] | 0;
-  if (f.label.isEmpty()) f.label = f.symbol;
+  if (f.label.isEmpty()) f.label = autoLabel(f);
 }
 
 String configToJson()

@@ -144,14 +144,14 @@ struct Rgb { uint8_t r, g, b; };
 enum PalIdx {
   P_LABEL, P_PRICE, P_PCT_UP, P_PCT_DOWN,
   P_FILL_UP, P_TRACE_UP, P_FILL_DOWN, P_TRACE_DOWN,
-  P_DIM, P_ACCENT, P_STALE,
+  P_DIM, P_ACCENT, P_STALE, P_DIVIDER,
   P_COUNT
 };
 
 static const char* const PAL_NAMES[P_COUNT] = {
   "LABEL", "PRICE", "PCT_UP", "PCT_DOWN",
   "FILL_UP", "TRACE_UP", "FILL_DOWN", "TRACE_DOWN",
-  "DIM", "ACCENT", "STALE"
+  "DIM", "ACCENT", "STALE", "DIVIDER"
 };
 
 static const Rgb PAL_FACTORY[P_COUNT] = {
@@ -165,7 +165,8 @@ static const Rgb PAL_FACTORY[P_COUNT] = {
   { 255, 150, 140 },   // TRACE_DOWN - chart trace when falling
   { 110, 120, 130 },   // DIM        - secondary text
   {  60, 140, 255 },   // ACCENT     - setup screens
-  { 230, 160,  40 }    // STALE      - label when data is old
+  { 230, 160,  40 },   // STALE      - label when data is old
+  {  60,  60,  60 }    // DIVIDER    - line between the ticker's sections; black hides it
 };
 
 static Rgb      s_pal[P_COUNT];
@@ -211,6 +212,7 @@ static uint16_t C_TRACE_DOWN() { return P(P_TRACE_DOWN); }
 static uint16_t C_DIM()        { return P(P_DIM);        }
 static uint16_t C_ACCENT()     { return P(P_ACCENT);     }
 static uint16_t C_STALE()      { return P(P_STALE);      }
+static uint16_t C_DIVIDER()    { return P(P_DIVIDER);    }
 
 // ---------------------------------------------------------------- text
 
@@ -703,6 +705,11 @@ static void drawTicker(const Config& cfg)
     const uint8_t top = (n + 1) / 2;
     tickerRow(cfg, s_rows[0], 0,   top,     0);
     tickerRow(cfg, s_rows[1], top, n - top, 16);
+
+    // Row 15 is the blank row between the sections, so a line there touches
+    // neither. It is a palette colour so it can be tuned live - or set to
+    // black, which takes it away.
+    matrix->drawFastHLine(0, 15, PANEL_W, C_DIVIDER());
   }
   else
   {
