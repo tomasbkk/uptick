@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.14.0"
+#define UPTICK_VERSION   "0.15.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 8
 
@@ -115,6 +115,12 @@ void marketConfigChanged();
 // the way it does against the exchange APIs. Blocking, ~1 second; only ever
 // called from the "check" button.
 bool marketProbeYahoo(const String& symbol, float& price, String& name, String& currency);
+
+// Which of these Yahoo tickers exist, for validating a feed list before it is
+// saved. Spark answers twenty at a time and leaves out any it does not know,
+// so this is one request per twenty tickers rather than one each. False only
+// when Yahoo could not be asked.
+bool marketCheckYahoo(const String* syms, uint8_t n, bool* found);
 
 // ---------------------------------------------------------------- net
 

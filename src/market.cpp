@@ -293,10 +293,11 @@ static const char* yahooInterval(const String& interval)
   return "1d";                                    // 4h and 1d
 }
 
-// Tickers carry characters that are not legal unencoded in a path: "^GSPC" for
-// an index, "EURUSD=X" for a pair. Yahoo accepts either form, so everything
-// outside the unreserved set is encoded rather than reasoned about.
-static String urlEncodePath(const String& s)
+// Tickers carry characters that are not legal unencoded in a URL: "^GSPC" for
+// an index, "EURUSD=X" for a pair, and Binance's batch takes a JSON array in
+// its query string. Everything outside the unreserved set is encoded rather
+// than reasoned about; all the APIs here decode it back.
+static String urlEncode(const String& s)
 {
   String out;
   out.reserve(s.length() + 8);
@@ -363,7 +364,7 @@ static String buildUrl(const Feed& f)
     // Symbol is the Yahoo ticker, which is not only stocks: "AAPL", "SPY",
     // "^GSPC", "EURUSD=X", "GC=F" and "SAP.DE" all resolve through the same
     // endpoint with the same fields.
-    return "https://query1.finance.yahoo.com/v8/finance/chart/" + urlEncodePath(f.symbol) +
+    return "https://query1.finance.yahoo.com/v8/finance/chart/" + urlEncode(f.symbol) +
            "?range="     + String(yahooRange(f.interval)) +
            "&interval="  + String(yahooInterval(f.interval));
   }
@@ -400,6 +401,15 @@ static void prepareClient(WiFiClientSecure& client, HTTPClient& https)
   https.setConnectTimeout(8000);
   https.setTimeout(12000);
   https.setUserAgent("uptick/" UPTICK_VERSION);
+
+  // Every parser here reads getStream() raw, and getStream() does not undo
+  // chunked transfer encoding - the chunk-size lines arrive in the byte stream
+  // mixed into the JSON. CoinGecko and Coinbase both chunk over HTTP/1.1, which
+  // silently broke their 24h lookups (the parse stopped at the first chunk
+  // header) and could splice hex digits into a chart price wherever a chunk
+  // boundary fell mid-number. HTTP/1.0 has no chunked encoding at all; all six
+  // endpoints in use were checked to answer it with a plain body.
+  https.useHTTP10(true);
 }
 
 // Second request, only reached when the charted window is shorter than 24h.
@@ -477,7 +487,7 @@ bool marketProbeYahoo(const String& symbol, float& price, String& name, String& 
 
   // The narrowest range there is: nothing here needs the series, only meta.
   const String url = "https://query1.finance.yahoo.com/v8/finance/chart/" +
-                     urlEncodePath(symbol) + "?range=1d&interval=1d";
+                     urlEncode(symbol) + "?range=1d&interval=1d";
 
   if (!https.begin(client, url)) return false;
 
@@ -647,16 +657,369 @@ static bool fetchFeed(const Feed& f, Quote& q)
   return true;
 }
 
+// ---------------------------------------------------------------- batch
+
+// Layouts that show many feeds at once - the price list now, the scrolling
+// ticker next - print a price and a change per feed and no chart. That is what
+// the batch endpoints return, so one request per source replaces one per feed:
+//
+//   binance    /api/v3/ticker/24hr?type=MINI&symbols=[...]   every symbol at once
+//   yahoo      /v8/finance/spark?symbols=...                 20 per request at most
+//   coingecko  /api/v3/simple/price?ids=...                  every id at once
+//   coinbase   no batch endpoint, so one /stats request per product
+//
+// Thirty feeds across Binance and Yahoo is two or three requests a cycle,
+// against thirty.
+//
+// Symbols are deduplicated before they go out. Binance refuses a list that
+// names one twice (-1151), and the same symbol can legitimately sit in two
+// feeds with different chart spans; each result is applied to every feed that
+// carries it.
+//
+// Binance also refuses the whole list over one symbol it does not recognise
+// (-1121). That is why the web page checks new symbols before it will save
+// them. A coin delisted after it was added would still take every Binance feed
+// stale with it - visibly, at least, since they would all show it.
+
+static bool     s_due[UPTICK_MAX_FEEDS];   // still owed a price this cycle
+static uint32_t s_cycleMs = 0;
+static bool     s_cycled  = false;
+
+static const uint8_t YAHOO_SPARK_MAX = 20;   // spark answers 400 above this
+
+// The distinct symbols among this cycle's outstanding feeds for one source,
+// in feed order.
+static uint8_t collectSymbols(const Config& cfg, const char* source, String* out, uint8_t maxOut)
+{
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < cfg.feedCount && n < maxOut; i++)
+  {
+    if (!s_due[i] || cfg.feeds[i].source != source) continue;
+
+    bool seen = false;
+    for (uint8_t k = 0; k < n && !seen; k++) seen = (out[k] == cfg.feeds[i].symbol);
+    if (!seen) out[n++] = cfg.feeds[i].symbol;
+  }
+  return n;
+}
+
+// Records one symbol's price against every outstanding feed that carries it.
+// The chart and its window change are left as they were - a batch has neither.
+static void applyQuote(const Config& cfg, const char* source, const String& sym,
+                       float price, float pct, bool hasPct)
+{
+  for (uint8_t i = 0; i < cfg.feedCount; i++)
+  {
+    if (!s_due[i] || cfg.feeds[i].source != source || cfg.feeds[i].symbol != sym) continue;
+    s_due[i] = false;
+
+    QuoteLock lk;
+    Quote& q = g_quotes[i];
+    q.price     = price;
+    q.change24h = pct;
+    q.has24h    = hasPct;
+    q.valid     = true;
+    q.fetchedMs = millis();
+    q.failures  = 0;
+
+    // Spark carries no currency, and a Yahoo feed only learns its own from a
+    // chart fetch. Until it has had one, "unknown" prints no symbol at all,
+    // which beats a "$" in front of a price quoted in euros.
+    if (!strcmp(source, "yahoo") && q.count == 0) q.ccy[0] = 0;
+  }
+}
+
+// Whatever was asked for and did not come back failed this cycle. Clears it
+// either way, so a failed request never leaves the cycle stuck on it.
+static void failRequested(const Config& cfg, const char* source, const String* syms, uint8_t n)
+{
+  for (uint8_t i = 0; i < cfg.feedCount; i++)
+  {
+    if (!s_due[i] || cfg.feeds[i].source != source) continue;
+
+    for (uint8_t k = 0; k < n; k++)
+    {
+      if (cfg.feeds[i].symbol != syms[k]) continue;
+      s_due[i] = false;
+      QuoteLock lk;
+      g_quotes[i].failures++;
+      break;
+    }
+  }
+}
+
+// status, when given, receives the HTTP code (0 if the request never got that
+// far) so a caller can tell a meaningful refusal from a failure to ask.
+static bool getJson(const String& url, JsonDocument& filter, JsonDocument& doc,
+                    const char* tag, bool geckoKey = false, int* status = nullptr)
+{
+  if (status) *status = 0;
+
+  WiFiClientSecure client;
+  HTTPClient       https;
+  prepareClient(client, https);
+
+  if (!https.begin(client, url))
+  {
+    Serial.printf("[mkt] %s: begin failed\n", tag);
+    return false;
+  }
+  if (geckoKey && s_cgKey.length()) https.addHeader("x-cg-demo-api-key", s_cgKey);
+
+  const int code = https.GET();
+  if (status) *status = code;
+  if (code != HTTP_CODE_OK)
+  {
+    Serial.printf("[mkt] %s: http %d\n", tag, code);
+    https.end();
+    return false;
+  }
+
+  // Objects and arrays of objects throughout, so key filtering works and the
+  // document holds only the two or three fields wanted from each entry.
+  DeserializationError e = deserializeJson(doc, https.getStream(),
+                                           DeserializationOption::Filter(filter));
+  https.end();
+  if (e)
+  {
+    Serial.printf("[mkt] %s: %s\n", tag, e.c_str());
+    return false;
+  }
+  return true;
+}
+
+static void batchBinance(const Config& cfg)
+{
+  String syms[UPTICK_MAX_FEEDS];
+  const uint8_t n = collectSymbols(cfg, "binance", syms, UPTICK_MAX_FEEDS);
+  if (!n) return;
+
+  String list = "[";
+  for (uint8_t k = 0; k < n; k++)
+  {
+    if (k) list += ",";
+    list += "\"" + syms[k] + "\"";
+  }
+  list += "]";
+
+  JsonDocument filter;
+  JsonObject   want = filter.add<JsonObject>();   // one element filters them all
+  want["symbol"]    = true;
+  want["lastPrice"] = true;
+  want["openPrice"] = true;
+
+  JsonDocument doc;
+  uint8_t      got = 0;
+  if (getJson("https://api.binance.com/api/v3/ticker/24hr?type=MINI&symbols=" + urlEncode(list),
+              filter, doc, "binance batch"))
+  {
+    for (JsonObjectConst o : doc.as<JsonArrayConst>())
+    {
+      const float last = atof(o["lastPrice"] | "0");
+      const float open = atof(o["openPrice"] | "0");
+      if (last <= 0.0f) continue;
+
+      // MINI leaves out priceChangePercent. This is the same figure: open is
+      // the price at the start of the same rolling 24 hours.
+      applyQuote(cfg, "binance", String(o["symbol"] | ""), last,
+                 open > 0.0f ? (last - open) / open * 100.0f : 0.0f, open > 0.0f);
+      got++;
+    }
+  }
+  failRequested(cfg, "binance", syms, n);
+  Serial.printf("[mkt] binance batch: %u of %u\n", got, n);
+}
+
+static void batchYahoo(const Config& cfg)
+{
+  String syms[YAHOO_SPARK_MAX];
+  const uint8_t n = collectSymbols(cfg, "yahoo", syms, YAHOO_SPARK_MAX);
+  if (!n) return;
+
+  String       list;
+  JsonDocument filter;
+  for (uint8_t k = 0; k < n; k++)
+  {
+    if (k) list += ",";
+    list += urlEncode(syms[k]);
+    filter[syms[k]]["close"]              = true;
+    filter[syms[k]]["chartPreviousClose"] = true;
+  }
+
+  JsonDocument doc;
+  uint8_t      got = 0;
+  if (getJson("https://query1.finance.yahoo.com/v8/finance/spark?range=1d&interval=1d&symbols=" + list,
+              filter, doc, "yahoo batch"))
+  {
+    for (uint8_t k = 0; k < n; k++)
+    {
+      // Keyed by the plain symbol as sent. An unknown ticker is simply absent
+      // rather than failing the request.
+      JsonVariantConst s = doc[syms[k]];
+      if (s.isNull()) continue;
+
+      float price = 0.0f;
+      for (JsonVariantConst v : s["close"].as<JsonArrayConst>())
+        if (!v.isNull()) price = v.as<float>();
+      if (price <= 0.0f) continue;
+
+      // Against the previous close, as the chart path reports it - a rolling
+      // 24h means nothing for something that trades 6.5 hours a day.
+      const float prev = s["chartPreviousClose"] | 0.0f;
+      applyQuote(cfg, "yahoo", syms[k], price,
+                 prev > 0.0f ? (price - prev) / prev * 100.0f : 0.0f, prev > 0.0f);
+      got++;
+    }
+  }
+  failRequested(cfg, "yahoo", syms, n);
+  Serial.printf("[mkt] yahoo batch: %u of %u\n", got, n);
+}
+
+static void batchCoinGecko(const Config& cfg)
+{
+  String ids[UPTICK_MAX_FEEDS];
+  const uint8_t n = collectSymbols(cfg, "coingecko", ids, UPTICK_MAX_FEEDS);
+  if (!n) return;
+
+  String       list;
+  JsonDocument filter;
+  for (uint8_t k = 0; k < n; k++)
+  {
+    if (k) list += ",";
+    list += urlEncode(ids[k]);
+    filter[ids[k]]["usd"]            = true;
+    filter[ids[k]]["usd_24h_change"] = true;
+  }
+
+  JsonDocument doc;
+  uint8_t      got = 0;
+  if (getJson("https://api.coingecko.com/api/v3/simple/price?vs_currencies=usd&include_24hr_change=true&ids=" + list,
+              filter, doc, "coingecko batch", true))
+  {
+    for (uint8_t k = 0; k < n; k++)
+    {
+      JsonVariantConst c = doc[ids[k]];            // unknown ids are absent
+      const float price  = c["usd"] | 0.0f;
+      if (price <= 0.0f) continue;
+
+      JsonVariantConst pct = c["usd_24h_change"];
+      applyQuote(cfg, "coingecko", ids[k], price, pct | 0.0f, !pct.isNull());
+      got++;
+    }
+  }
+  failRequested(cfg, "coingecko", ids, n);
+  Serial.printf("[mkt] coingecko batch: %u of %u\n", got, n);
+}
+
+// Coinbase has no batch endpoint, so this is one product per call.
+static void singleCoinbase(const Config& cfg)
+{
+  String sym[1];
+  if (!collectSymbols(cfg, "coinbase", sym, 1)) return;
+
+  JsonDocument filter;
+  filter["open"] = true;
+  filter["last"] = true;
+
+  JsonDocument doc;
+  if (getJson("https://api.exchange.coinbase.com/products/" + urlEncode(sym[0]) + "/stats",
+              filter, doc, "coinbase"))
+  {
+    const float last = atof(doc["last"] | "0");
+    const float open = atof(doc["open"] | "0");
+    if (last > 0.0f)
+      applyQuote(cfg, "coinbase", sym[0], last,
+                 open > 0.0f ? (last - open) / open * 100.0f : 0.0f, open > 0.0f);
+  }
+  failRequested(cfg, "coinbase", sym, 1);
+}
+
+bool marketCheckYahoo(const String* syms, uint8_t n, bool* found)
+{
+  for (uint8_t k = 0; k < n; k++) found[k] = false;
+
+  for (uint8_t start = 0; start < n; start += YAHOO_SPARK_MAX)
+  {
+    const uint8_t end = (n - start > YAHOO_SPARK_MAX) ? start + YAHOO_SPARK_MAX : n;
+
+    String       list;
+    JsonDocument filter;
+    for (uint8_t k = start; k < end; k++)
+    {
+      if (k > start) list += ",";
+      list += urlEncode(syms[k]);
+      filter[syms[k]]["close"] = true;
+    }
+
+    JsonDocument doc;
+    int          code;
+    if (!getJson("https://query1.finance.yahoo.com/v8/finance/spark?range=1d&interval=1d&symbols=" + list,
+                 filter, doc, "yahoo check", false, &code))
+    {
+      // Spark leaves unknown tickers out of a mixed list, but when it knows
+      // none of them it answers 404 instead. That is an answer - this whole
+      // chunk is missing - not a failure to ask.
+      if (code == 404) continue;
+      return false;
+    }
+
+    for (uint8_t k = start; k < end; k++) found[k] = !doc[syms[k]].isNull();
+  }
+  return true;
+}
+
+// One request per call, so the web server is serviced between them. A cycle
+// starts every poll interval and runs until every feed has been answered.
+static void pollBatch(const Config& cfg, uint32_t now)
+{
+  bool pending = false;
+  for (uint8_t i = 0; i < cfg.feedCount && !pending; i++) pending = s_due[i];
+
+  if (!pending)
+  {
+    if (s_cycled && now - s_cycleMs < (uint32_t)cfg.refreshSec * 1000UL) return;
+    for (uint8_t i = 0; i < cfg.feedCount; i++) s_due[i] = true;
+    s_cycleMs = now;
+    s_cycled  = true;
+  }
+
+  static const char* const ORDER[] = { "binance", "yahoo", "coingecko", "coinbase" };
+  for (const char* src : ORDER)
+  {
+    for (uint8_t i = 0; i < cfg.feedCount; i++)
+    {
+      if (!s_due[i] || cfg.feeds[i].source != src) continue;
+
+      if      (!strcmp(src, "binance"))   batchBinance(cfg);
+      else if (!strcmp(src, "yahoo"))     batchYahoo(cfg);
+      else if (!strcmp(src, "coingecko")) batchCoinGecko(cfg);
+      else                                singleCoinbase(cfg);
+      return;
+    }
+  }
+
+  // Only a source nothing here recognises can reach this. Drop it rather than
+  // leave it outstanding, which would stop the next cycle from ever starting.
+  for (uint8_t i = 0; i < cfg.feedCount; i++) s_due[i] = false;
+}
+
 // ---------------------------------------------------------------- lifecycle
 
 // Called when the feed list changes. The attempt timers are indexed by feed
 // position, so after a reorder they describe whoever used to hold that slot.
 // Clearing them makes every feed due, and display-gated polling then refreshes
-// each one as its turn comes round rather than all at once.
+// each one as its turn comes round rather than all at once. The batch cycle is
+// restarted for the same reason, which also puts fresh prices up straight
+// after a save.
 void marketConfigChanged()
 {
-  for (uint8_t i = 0; i < UPTICK_MAX_FEEDS; i++) s_lastAttemptMs[i] = 0;
+  for (uint8_t i = 0; i < UPTICK_MAX_FEEDS; i++)
+  {
+    s_lastAttemptMs[i] = 0;
+    s_due[i]           = false;
+  }
   s_lastAnyFetchMs = 0;
+  s_cycled         = false;
 }
 
 void marketBegin()
@@ -668,6 +1031,8 @@ void marketBegin()
   s_cgKey = prefs.getString("cgkey", "");
   prefs.end();
 }
+
+static void pollCharts(const Config& cfg, uint32_t now);
 
 void marketPoll()
 {
@@ -685,8 +1050,18 @@ void marketPoll()
     seenRev = g_cfgRev;
   }
 
-  const uint32_t now   = millis();
-  const uint8_t  feeds = cfg.feedCount ? cfg.feedCount : 1;
+  const uint32_t now = millis();
+
+  // Only the chart layout needs candles, and it shows one feed at a time.
+  // Every other layout shows prices for many feeds at once, which is what the
+  // batch endpoints are for.
+  if (cfg.mode == "single_chart") pollCharts(cfg, now);
+  else                            pollBatch(cfg, now);
+}
+
+static void pollCharts(const Config& cfg, uint32_t now)
+{
+  const uint8_t feeds = cfg.feedCount ? cfg.feedCount : 1;
 
   // Poll only what is on screen.
   //

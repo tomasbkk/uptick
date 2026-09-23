@@ -156,7 +156,7 @@
       </div>
     </div>
     <p class="hint">Panel: <span id="panelInfo">-</span>. Refresh runs on DMA with no CPU involved, so nothing the device does can make it flicker. Colour depth is fixed by the firmware build.</p>
-    <p class="hint">Fetches are spread evenly across the poll interval - four feeds at 60s means one request every 15s, not four at once.</p>
+    <p class="hint">Single chart fetches only the feed on screen, as its turn comes up. The price list fetches every feed in one request per source - Binance, CoinGecko and up to 20 Yahoo tickers each take one - so the poll interval costs the same at thirty feeds as at three.</p>
 
     <p class="hint">The percentage is always the 24 hour change, whatever span the chart covers - so it stays comparable between feeds. The chart is coloured by its own direction, so the two can disagree.</p>
     <label><input type="checkbox" id="rotate180"> rotate 180 degrees</label>
@@ -302,8 +302,16 @@ async function saveWifi() {
 
 // ---------------------------------------------------------------- config
 
+// The feed list as the device last saved it. Save only checks feeds that are
+// not in here - they were checked on the way in, and re-checking thirty
+// unchanged symbols on every save would be slow for nothing.
+let savedFeeds = [];
+const feedKey = f => f.source + ':' + f.symbol;
+const snapshotFeeds = () => { savedFeeds = cfg.feeds.map(f => ({ ...f })); };
+
 async function loadConfig() {
   cfg = await api('/api/config');
+  snapshotFeeds();
   $('brightness').value = cfg.brightness;
   $('briVal').textContent = cfg.brightness + '%';
   $('mode').value        = cfg.mode;
@@ -379,6 +387,80 @@ async function checkSymbol(i) {
     el.className = 'chk bad';
     el.textContent = 'not found on ' + f.source;
   }
+}
+
+// Checks every feed whose source and symbol are not already saved, marking
+// each one's line as it goes. Returns the ones definitively rejected by their
+// source (bad) apart from the ones that could not be checked at all (unsure) -
+// an unreachable API says nothing about whether the symbol exists.
+async function validateNewFeeds() {
+  const known = new Set(savedFeeds.map(feedKey));
+  const todo  = cfg.feeds.map((f, i) => ({ f, i })).filter(x => !known.has(feedKey(x.f)));
+  const bad = [], unsure = [];
+  if (!todo.length) return { bad, unsure };
+
+  toast('checking ' + todo.length + ' new symbol' + (todo.length > 1 ? 's' : '') + '...');
+
+  const mark = (x, state) => {
+    const el = $('chk' + x.i);
+    if (!el) return;
+    el.className   = 'chk' + (state === 'ok' ? ' ok' : state === 'bad' ? ' bad' : '');
+    el.textContent = state === 'ok'  ? 'ok'
+                   : state === 'bad' ? 'not found on ' + x.f.source
+                                     : 'could not check - ' + x.f.source + ' unreachable';
+    (state === 'bad' ? bad : state === 'unsure' ? unsure : []).push(x);
+  };
+  const by = src => todo.filter(x => x.f.source === src);
+
+  // Coinbase one product per request, in parallel - it has no list endpoint
+  // that says which of several products exist.
+  const single = async (x, url) => {
+    try {
+      const r = await fetch(url);
+      mark(x, r.ok ? 'ok' : (r.status === 400 || r.status === 404) ? 'bad' : 'unsure');
+    } catch (e) { mark(x, 'unsure'); }
+  };
+
+  // Everything else is one request for the lot, answering with the set of
+  // symbols that exist - absence is the rejection.
+  const batch = async (list, fetchKnown) => {
+    if (!list.length) return;
+    try {
+      const known = await fetchKnown([...new Set(list.map(x => x.f.symbol))]);
+      for (const x of list) mark(x, known.has(x.f.symbol) ? 'ok' : 'bad');
+    } catch (e) { for (const x of list) mark(x, 'unsure'); }
+  };
+
+  const enc = s => encodeURIComponent(s);
+  await Promise.all([
+    // Binance from its full symbol list rather than per symbol. Per symbol
+    // cannot work from a browser: Binance leaves the CORS header off its error
+    // responses, so the 400 for an unknown symbol is unreadable - exactly what
+    // an unreachable Binance looks like. The full list is a 200 with the
+    // header, about 26 KB compressed.
+    batch(by('binance'), async () => {
+      const r = await fetch('https://api.binance.com/api/v3/ticker/price');
+      if (!r.ok) throw new Error(r.status);
+      return new Set((await r.json()).map(t => t.symbol));
+    }),
+
+    ...by('coinbase').map(x =>
+      single(x, 'https://api.exchange.coinbase.com/products/' + enc(x.f.symbol) + '/ticker')),
+
+    batch(by('coingecko'), async ids => {
+      const r = await fetch('https://api.coingecko.com/api/v3/simple/price?vs_currencies=usd&ids=' +
+                            ids.map(enc).join(','));
+      if (!r.ok) throw new Error(r.status);
+      return new Set(Object.keys(await r.json()));
+    }),
+
+    // Through the device: Yahoo sends no CORS header, so the browser cannot
+    // read its answers directly.
+    batch(by('yahoo'), async syms =>
+      new Set((await api('/api/check?symbols=' + syms.map(enc).join(','))).found))
+  ]);
+
+  return { bad, unsure };
 }
 
 function renderFeeds() {
@@ -586,11 +668,26 @@ async function saveConfig() {
   cfg.tz         = $('tz').value;
   cfg.rotate180  = $('rotate180').checked;
   cfg.wifiSleep  = $('wifiSleepCfg').checked;
+
+  // A symbol its source does not recognise is refused before anything is
+  // sent. It would otherwise fail on every fetch - and on Binance it fails the
+  // whole batch, taking every other Binance feed stale with it.
+  const v = await validateNewFeeds();
+  if (v.bad.length) {
+    const first = v.bad[0].f;
+    return toast(v.bad.length === 1
+      ? first.symbol + ' not found on ' + first.source + ' - fix or remove it'
+      : v.bad.length + ' symbols not found - fix or remove them', true);
+  }
+
   try {
-    const r = await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
+    await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
+    snapshotFeeds();
     dirty(false);
-    toast('saved');
     renderFeeds();
+    toast(v.unsure.length
+      ? 'saved - ' + v.unsure.length + ' symbol' + (v.unsure.length > 1 ? 's' : '') + ' could not be checked'
+      : 'saved');
   } catch (e) { toast(e.message, true); }
 }
 

@@ -199,14 +199,57 @@ static void handleApiKey()
 // itself and the device never sees them.
 static void handleCheck()
 {
-  const String symbol = http.arg("symbol");
-  if (symbol.isEmpty()) { sendErr(400, "no symbol"); return; }
-
   if (g_net.apMode || WiFi.status() != WL_CONNECTED)
   {
     sendErr(503, "not on a network yet");
     return;
   }
+
+  // ?symbols=A,B,C - existence only, for the check the page runs before it
+  // saves a feed list. Answers which were found and which were not, so the
+  // page can point at the bad one rather than refusing the whole list.
+  if (http.hasArg("symbols"))
+  {
+    String  syms[UPTICK_MAX_FEEDS];
+    uint8_t n   = 0;
+    String  all = http.arg("symbols");
+
+    int from = 0;
+    while (from <= (int)all.length() && n < UPTICK_MAX_FEEDS)
+    {
+      int comma = all.indexOf(',', from);
+      if (comma < 0) comma = all.length();
+      String s = all.substring(from, comma);
+      s.trim();
+      if (s.length()) syms[n++] = s;
+      from = comma + 1;
+    }
+    if (!n) { sendErr(400, "no symbols"); return; }
+
+    bool found[UPTICK_MAX_FEEDS];
+    if (!marketCheckYahoo(syms, n, found))
+    {
+      // Distinct from "not found": the page saves anyway with a warning,
+      // because Yahoo being unreachable says nothing about the symbols.
+      sendErr(502, "could not reach Yahoo");
+      return;
+    }
+
+    JsonDocument d;
+    d["ok"] = true;
+    JsonArray yes = d["found"].to<JsonArray>();
+    JsonArray no  = d["missing"].to<JsonArray>();
+    for (uint8_t k = 0; k < n; k++) (found[k] ? yes : no).add(syms[k]);
+
+    String out;
+    serializeJson(d, out);
+    sendJson(200, out);
+    return;
+  }
+
+  // ?symbol=X - the "check" button: price, name and currency for one ticker.
+  const String symbol = http.arg("symbol");
+  if (symbol.isEmpty()) { sendErr(400, "no symbol"); return; }
 
   float  price = 0;
   String name, currency;

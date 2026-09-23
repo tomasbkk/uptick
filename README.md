@@ -84,6 +84,21 @@ Factory feeds are BTC, ETH, SOL and ZEC on Binance. `decimals: 0` means "pick fr
 
 The `source` field is the extension point: `binance`, `coinbase` and `coingecko` for crypto and `yahoo` for stocks and everything else Yahoo Finance lists, each behind its own fetch adapter. The renderer never learns where the numbers came from.
 
+### Symbols are checked before they are saved
+
+Save checks every feed whose source and symbol are not already stored, and refuses a symbol its source does not recognise, marking the offending line. Unchanged feeds are not re-checked - they were checked on the way in - so saving thirty feeds after changing one costs one check.
+
+| Source | How it is checked |
+| --- | --- |
+| Binance | its full symbol list, once - about 26 KB compressed |
+| Yahoo | through the device, which asks spark for up to 20 at a time |
+| CoinGecko | one `simple/price` request for all the ids |
+| Coinbase | one request per product, in parallel |
+
+Binance cannot be checked per symbol from a browser. It leaves the CORS header off its error responses, so the 400 for an unknown symbol is unreadable to the page - exactly what an unreachable Binance looks like. The full list is a 200 with the header.
+
+A source that cannot be reached at all does not block the save: that says nothing about whether the symbol exists. The page saves and says how many could not be checked. Only the web page validates; a config POSTed to `/api/config` directly is trusted as given.
+
 ### Ordering feeds
 
 The rotation follows the order of the `feeds` array, so reordering is an array move and nothing else. The web UI offers both a drag grip and up/down arrows; like every other feed edit, the new order is held until Save.
@@ -114,7 +129,8 @@ Both run entirely in the browser - the page already holds the config, so no endp
 | POST | `/api/defaults` | restore factory settings, leaving WiFi alone |
 | POST | `/api/apikey` | store the CoinGecko key (write-only) |
 | POST | `/api/fetch` | pause or resume market polling |
-| GET | `/api/check?symbol=` | validate a Yahoo ticker on the page's behalf (Yahoo sends no CORS header) |
+| GET | `/api/check?symbol=` | one Yahoo ticker's price, name and currency, for the check button (Yahoo sends no CORS header) |
+| GET | `/api/check?symbols=A,B` | which of several Yahoo tickers exist, for the check before saving |
 | POST | `/api/wifisleep` | toggle WiFi power save |
 | GET | `/api/files` | list LittleFS contents |
 | GET | `/api/scan` | visible networks |
@@ -162,7 +178,7 @@ It is not only stocks. The same endpoint and the same three fields cover ETFs (`
 Two things to know about it:
 
 - **It is unofficial.** There is no contract and no support. If it changes shape, the adapter breaks. Yahoo also rejects a `curl/*` User-Agent with a 429 - `uptick/<version>` passes, but that is the sort of filter that can tighten without notice.
-- **It sends no CORS header**, unlike all three crypto APIs. The web page cannot check a ticker from the browser, so those checks go through `/api/check` on the device instead. One TLS handshake per click, and only when the button is pressed.
+- **It sends no CORS header**, where the crypto APIs do on their normal responses. The web page cannot check a ticker from the browser, so those checks go through `/api/check` on the device instead.
 
 Not every listing is priced in dollars, so the quote currency is read from the same response and carried on the `Quote`. The panel prints `$` only when the currency really is USD - a Frankfurt or London line prints bare, since the 5x7 font has no glyph for those and a wrong symbol is worse than none. The crypto sources are all USD pairs and are unaffected.
 
@@ -178,11 +194,34 @@ Yahoo needs a second scanner (`extractYahoo`). Its series sits three arrays deep
 
 ### Polling schedule
 
-Two rules, both driven by what is on screen:
+The layout decides how data is fetched.
 
-**Only the visible feed is polled.** A feed nobody is looking at does not need fresh data, and fetching it disturbs the panel showing something else. This puts every fetch at a screen transition - the moment a glitch is least noticeable, because the content is changing anyway - and leaves the rest of each dwell completely quiet. The cost is that effective refresh becomes the rotation period rather than the poll interval.
+**Single chart polls only the feed on screen**, one candle request at a time. A feed nobody is looking at does not need a fresh chart, so every fetch lands at a screen transition and the rest of each dwell is quiet. The cost is that effective refresh becomes the rotation period rather than the poll interval.
 
-**In layouts that show every feed**, fetches are spaced `interval / feeds` apart instead. Without that they clump: `marketPoll` runs off the network loop every couple of milliseconds, so the moment one fetch finishes the next due feed starts. Four feeds at 60s produced a six second burst of four TLS handshakes followed by 54 seconds of quiet.
+**Every other layout batches.** The price list - and the scrolling ticker to come - shows a price and a change per feed and no chart, which is what the batch endpoints return. One request per source replaces one per feed, every poll interval:
+
+| Source | Batch request | Per request |
+| --- | --- | --- |
+| Binance | `/api/v3/ticker/24hr?type=MINI&symbols=[...]` | every symbol |
+| Yahoo | `/v8/finance/spark?symbols=...&range=1d&interval=1d` | 20 at most - spark answers 400 above that |
+| CoinGecko | `/api/v3/simple/price?ids=...&include_24hr_change=true` | every id |
+| Coinbase | `/products/{id}/stats` | one - there is no batch endpoint |
+
+Measured on the device with eight feeds across Binance and Yahoo: two requests a cycle, about half a second apart, and nothing else until the next one. At thirty feeds it is still two or three.
+
+Each call to `marketPoll` makes at most one request, so the web server is serviced between them. Batch data updates price and change only; charts are left as they were and refilled when the chart layout is next on.
+
+Details that each cost something to find:
+
+- Binance `MINI` leaves out `priceChangePercent`. It is recomputed from `openPrice`, which opens the same rolling 24 hours, so the figure is identical.
+- Symbols are deduplicated before they go out. Binance refuses a list that names one twice (`-1151`), and the same symbol can legitimately sit in two feeds with different chart spans; each result is applied to every feed that carries it.
+- Binance also refuses the whole list over one symbol it does not recognise (`-1121`), which is why the web page checks symbols before saving. A coin delisted after it was added would still take every Binance feed stale with it - visibly, since they would all show it.
+- Yahoo and CoinGecko simply leave unknown symbols out of a mixed answer. Spark answers 404 when it recognises none of them.
+- Spark carries no currency. A Yahoo feed that has only ever been batch-fetched prints no currency symbol rather than a possibly wrong `$`; its first chart fetch teaches it the real one.
+
+### HTTP/1.0, and chunked responses
+
+Every request is made with `useHTTP10(true)`. The parsers read `getStream()` raw, and `getStream()` does not undo chunked transfer encoding: the chunk-size lines arrive in the byte stream mixed into the JSON. CoinGecko and Coinbase both chunk over HTTP/1.1, which silently broke their 24h lookups - the parse stopped at the first chunk header - and could splice hex digits into a chart price wherever a chunk boundary fell mid-number. HTTP/1.0 has no chunked encoding; all six endpoints were checked to answer it with a plain body.
 
 ## Display
 
@@ -281,7 +320,7 @@ Working: provisioning, captive portal, web config, live palette tuning, OTA, fli
 
 Ideas, roughly in order of value:
 
-- **Scrolling ticker mode** for large feed lists - `BTC 84,434 -1.7%` scrolling past rather than one feed per page. Needs batch fetching (Binance `ticker/24hr?symbols=`, Yahoo `v8/finance/spark`) and a higher feed limit.
+- **Scrolling ticker mode** for large feed lists - `BTC 84,434 -1.7%` scrolling past rather than one feed per page. Batch fetching is in place; it needs a higher feed limit.
 - Buttons for feed cycling, LIS3DH tap-to-advance and orientation
 - ESP Web Tools + Improv for browser flashing and provisioning
 - A second PlatformIO environment for plain ESP32 boards (needs a pin remap and a 4 MB partition table)
