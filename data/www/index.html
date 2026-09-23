@@ -116,7 +116,7 @@
       <h2>Feeds</h2>
       <div id="feeds"></div>
       <div class="row">
-        <button onclick="addFeed()">+ add feed</button>
+        <button onclick="addFeed()">+ Add Ticker</button>
         <button class="primary save" onclick="saveConfig()">Save</button>
         <button onclick="exportFeeds()">Export</button>
         <button onclick="$('importFile').click()">Import</button>
@@ -516,7 +516,7 @@ function renderFeeds() {
       <div class="head">
         <span class="grip" draggable="true" title="drag to reorder"
               ondragstart="feedDragStart(event,${i})" ondragend="feedDragEnd()">&#8942;&#8942;</span>
-        <b>${f.label || f.symbol}</b>
+        <b>${f.label || f.symbol || 'new feed'}</b>
         <button class="x" title="move up"   onclick="moveFeed(${i},-1)"
                 ${i === 0 ? 'disabled' : ''}>&uarr;</button>
         <button class="x" title="move down" onclick="moveFeed(${i},1)"
@@ -526,14 +526,15 @@ function renderFeeds() {
       <div class="row">
         <div><label>Symbol</label>
           <div class="symrow">
-            <input value="${f.symbol}" placeholder="${f.source === 'coingecko' ? 'bitcoin' : f.source === 'yahoo' ? 'AAPL' : 'BTCUSDT'}"
+            <input id="sym${i}" value="${f.symbol}" placeholder="${f.source === 'coingecko' ? 'bitcoin' : f.source === 'yahoo' ? 'AAPL' : 'BTCUSDT'}"
                    oninput="cfg.feeds[${i}].symbol = cfg.feeds[${i}].source === 'coingecko'
                             ? this.value.toLowerCase().trim() : this.value.toUpperCase().trim()">
             <button onclick="checkSymbol(${i})">check</button>
           </div>
           <p class="chk" id="chk${i}"></p></div>
         <div><label>Label</label>
-          <input value="${f.label}" oninput="cfg.feeds[${i}].label=this.value"></div>
+          <input value="${f.label}" placeholder="same as symbol"
+                 oninput="cfg.feeds[${i}].label=this.value"></div>
       </div>
       <div class="row">
         <div><label>Source</label>
@@ -555,11 +556,18 @@ function renderFeeds() {
     </div>`).join('');
 }
 
+// A new feed starts blank, on the source of the feed above it, so adding
+// several from one exchange in a row does not mean picking it every time.
+// Decimals 0 is "pick from magnitude", as for the factory feeds.
 function addFeed() {
   if (cfg.feeds.length >= maxFeeds) return toast(maxFeeds + ' feeds max', true);
-  cfg.feeds.push({ source:'binance', symbol:'ETHUSDT', label:'ETH', interval:'1h', decimals:2 });
+  const prev = cfg.feeds[cfg.feeds.length - 1];
+  cfg.feeds.push({ source: prev ? prev.source : 'binance', symbol:'', label:'',
+                   interval:'1h', decimals:0 });
   renderFeeds();
   dirty();
+  const el = $('sym' + (cfg.feeds.length - 1));
+  if (el) el.focus();                  // also scrolls a long list down to it
 }
 
 function delFeed(i) {
@@ -764,6 +772,14 @@ async function saveConfig() {
   // A symbol its source does not recognise is refused before anything is
   // sent. It would otherwise fail on every fetch - and on Binance it fails the
   // whole batch, taking every other Binance feed stale with it.
+  const blank = cfg.feeds.findIndex(f => !f.symbol.trim());
+  if (blank >= 0) {
+    const el = $('chk' + blank);
+    if (el) { el.className = 'chk bad'; el.textContent = 'enter a symbol, or remove this feed'; }
+    if ($('sym' + blank)) $('sym' + blank).focus();
+    return toast('feed ' + (blank + 1) + ' has no symbol', true);
+  }
+
   const v = await validateNewFeeds();
   if (v.bad.length) {
     const first = v.bad[0].f;
@@ -771,6 +787,10 @@ async function saveConfig() {
       ? first.symbol + ' not found on ' + first.source + ' - fix or remove it'
       : v.bad.length + ' symbols not found - fix or remove them', true);
   }
+
+  // A label left blank takes the symbol - done only now the symbols have
+  // passed, so a label is never copied from a typo that then gets corrected.
+  for (const f of cfg.feeds) if (!f.label.trim()) f.label = f.symbol;
 
   try {
     await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
