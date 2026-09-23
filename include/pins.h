@@ -63,3 +63,16 @@ static const uint8_t PANEL_BRIGHTNESS_DEFAULT = 5;
 // 30 - every fetch is a TLS handshake, and a desk ticker does not need a price
 // that is fresher than a minute.
 static const uint16_t POLL_SEC_DEFAULT = 60;
+
+// Ticker scroll speed, pixels per second. The tape moves one pixel a frame,
+// so this is also its frame rate. 30 read as a little fast on the real panel
+// with two sections moving; 20 is about three characters a second. Much below
+// 15 the motion starts to look stepped, since each step is a whole pixel.
+static const uint8_t SCROLL_PPS_DEFAULT = 20;
+static const uint8_t SCROLL_PPS_MIN     = 10;
+static const uint8_t SCROLL_PPS_MAX     = 90;
+
+// Vertical ticker pause, seconds. 0 crawls continuously; anything more holds
+// the list each time an entry reaches the top, the way a departure board does.
+static const uint8_t PAUSE_SEC_DEFAULT = 0;
+static const uint8_t PAUSE_SEC_MAX     = 10;

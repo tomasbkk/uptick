@@ -64,7 +64,15 @@
   #toast.bad { border-color:var(--down); color:var(--down); }
   .hide { display:none; }
   .hint { color:var(--dim); font-size:11px; margin:10px 0 0; }
-  .dirty #saveAll { box-shadow:0 0 0 2px var(--accent); }
+  .dirty .save { box-shadow:0 0 0 2px var(--accent); }
+  .tabs { display:flex; margin:0 0 12px; border-bottom:1px solid var(--line); }
+  .tabs button { flex:1; width:auto; background:none; border:none; border-radius:0;
+                 border-bottom:2px solid transparent; margin-bottom:-1px;
+                 color:var(--dim); padding:10px 6px; font-weight:600; }
+  .tabs button:hover { color:var(--fg); }
+  .tabs button.on { color:var(--fg); border-bottom-color:var(--accent); }
+  .tab { display:none; }
+  .tab.on { display:block; }
   .sw { display:grid; grid-template-columns:repeat(4,1fr); gap:4px; margin-bottom:10px; }
   .sw div { aspect-ratio:1/0.9; border-radius:4px; display:flex; align-items:flex-end;
             justify-content:center; font-size:10px; padding-bottom:3px; color:#0d1117;
@@ -96,129 +104,160 @@
   </header>
   <div id="status">connecting...</div>
 
-  <div class="card hide" id="wifiCard">
-    <h2>WiFi</h2>
-    <div id="netList"></div>
-    <label>Network</label>
-    <input id="ssid" placeholder="SSID">
-    <label>Password</label>
-    <input id="pass" type="password" placeholder="leave blank if open">
-    <div style="height:12px"></div>
-    <button class="primary" onclick="saveWifi()">Join and restart</button>
-  </div>
+  <nav class="tabs">
+    <button data-tab="tickers"  onclick="showTab('tickers')">Tickers</button>
+    <button data-tab="display"  onclick="showTab('display')">Display</button>
+    <button data-tab="settings" onclick="showTab('settings')">Settings</button>
+  </nav>
 
-  <div class="card">
-    <h2>Feeds</h2>
-    <div id="feeds"></div>
-    <div class="row">
-      <button onclick="addFeed()">+ add feed</button>
-      <button class="primary" onclick="saveConfig()">Save</button>
-      <button onclick="exportFeeds()">Export</button>
-      <button onclick="$('importFile').click()">Import</button>
-      <input type="file" id="importFile" accept="application/json,.json"
-             style="display:none" onchange="importFeeds(this)">
-    </div>
-    <p class="hint">Feed edits, including the order, are not stored until you save. Drag the grip or use the arrows to reorder; the feed on screen finishes its turn before the new order starts. Export writes the feed list to a file you can import again after a reflash - <code>pio run -t uploadfs</code> rewrites the whole filesystem partition, which erases the saved config.</p>
-  </div>
-
-  <div class="card">
-    <h2>Display</h2>
-    <label>Brightness <span id="briVal"></span></label>
-    <input type="range" id="brightness" min="1" max="100" oninput="liveBrightness()">
-    <p class="hint">Live preview only - save to keep it across a reset.</p>
-    <div class="row">
-      <div>
-        <label>Mode</label>
-        <select id="mode">
-          <option value="single_chart">single + chart</option>
-          <option value="multi_price">multi price</option>
-          <option value="palette_test">palette test</option>
-        </select>
+  <!-- ============================================================ tickers -->
+  <section class="tab" id="tab-tickers">
+    <div class="card">
+      <h2>Feeds</h2>
+      <div id="feeds"></div>
+      <div class="row">
+        <button onclick="addFeed()">+ add feed</button>
+        <button class="primary save" onclick="saveConfig()">Save</button>
+        <button onclick="exportFeeds()">Export</button>
+        <button onclick="$('importFile').click()">Import</button>
+        <input type="file" id="importFile" accept="application/json,.json"
+               style="display:none" onchange="importFeeds(this)">
       </div>
-      <div>
-        <label>Seconds per feed</label>
-        <input id="dwellSec" type="number" min="3" max="3600">
+      <p class="hint">Feed edits, including the order, are not stored until you save. Drag the grip or use the arrows to reorder; the feed on screen finishes its turn before the new order starts. In the ticker the first half of the list scrolls along the top and the second half below, so the order also picks the section.</p>
+      <p class="hint">Export writes the feed list to a file you can import again after a reflash - <code>pio run -t uploadfs</code> rewrites the whole filesystem partition, which erases the saved config.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ display -->
+  <section class="tab" id="tab-display">
+    <div class="card">
+      <h2>Display</h2>
+      <label>Brightness <span id="briVal"></span></label>
+      <input type="range" id="brightness" min="1" max="100" oninput="liveBrightness()">
+
+      <label>Mode</label>
+      <select id="mode" onchange="liveMode()">
+        <option value="single_chart">single + chart</option>
+        <option value="ticker">ticker - horizontal scroll</option>
+        <option value="ticker_vertical">ticker - vertical scroll</option>
+      </select>
+
+      <div class="forTicker">
+        <label>Scroll speed <span id="spdVal"></span></label>
+        <input type="range" id="scrollSpeed" min="10" max="60" oninput="liveSpeed()">
       </div>
-    </div>
-    <div class="row">
-      <div>
-        <label>Price poll</label>
-        <select id="refreshSec">
-          <option value="30">every 30s</option>
-          <option value="60">every 60s</option>
-          <option value="120">every 2 min</option>
-          <option value="180">every 3 min</option>
-        </select>
+      <div class="forVertical">
+        <label>Pause at each entry <span id="pauseVal"></span></label>
+        <input type="range" id="pauseSec" min="0" max="10" oninput="livePause()">
+        <p class="hint">0 scrolls continuously. Above 0 the list holds each time an entry reaches the top, then rises one - easier to read, since vertical motion moves every character at once.</p>
       </div>
-      <div>
-        <label>Timezone</label>
-        <input id="tz">
+      <p class="hint">Mode and the sliders apply to the panel straight away - save to keep them across a restart.</p>
+
+      <div class="row">
+        <div class="forChart">
+          <label>Seconds per feed</label>
+          <input id="dwellSec" type="number" min="3" max="3600">
+        </div>
+        <div>
+          <label>Price poll</label>
+          <select id="refreshSec">
+            <option value="30">every 30s</option>
+            <option value="60">every 60s</option>
+            <option value="120">every 2 min</option>
+            <option value="180">every 3 min</option>
+          </select>
+        </div>
       </div>
+
+      <label><input type="checkbox" id="rotate180"> rotate 180 degrees</label>
+
+      <div style="height:12px"></div>
+      <button class="primary save" onclick="saveConfig()">Save settings</button>
+
+      <p class="hint">Single + chart fetches only the feed on screen, as its turn comes up; both tickers fetch every feed in one request per source - Binance, CoinGecko and up to 20 Yahoo tickers each take one - so the poll interval costs the same at thirty feeds as at three.</p>
+      <p class="hint">The percentage is always the 24 hour change, whatever span the chart covers - so it stays comparable between feeds. The chart is coloured by its own direction, so the two can disagree.</p>
+      <p class="hint">Panel: <span id="panelInfo">-</span>. Refresh runs on DMA with no CPU involved, so nothing the device does can make it flicker. Colour depth is fixed by the firmware build.</p>
     </div>
-    <p class="hint">Panel: <span id="panelInfo">-</span>. Refresh runs on DMA with no CPU involved, so nothing the device does can make it flicker. Colour depth is fixed by the firmware build.</p>
-    <p class="hint">Single chart fetches only the feed on screen, as its turn comes up. The price list fetches every feed in one request per source - Binance, CoinGecko and up to 20 Yahoo tickers each take one - so the poll interval costs the same at thirty feeds as at three.</p>
+  </section>
 
-    <p class="hint">The percentage is always the 24 hour change, whatever span the chart covers - so it stays comparable between feeds. The chart is coloured by its own direction, so the two can disagree.</p>
-    <label><input type="checkbox" id="rotate180"> rotate 180 degrees</label>
-    <label><input type="checkbox" id="wifiSleepCfg"> WiFi power save (off steadies the panel slightly)</label>
-  </div>
-
-  <div class="card">
-    <h2>Palette test</h2>
-    <p class="hint" style="margin-top:0">Colours apply to the panel immediately and are not saved. Switch to the palette screen to see all eleven side by side, or leave it on the chart to judge them in place. Export when you have a set worth keeping.</p>
-    <div class="pal" id="pal"></div>
-    <div class="lv">
-      <button onclick="palReset()">reset to factory</button>
-      <button onclick="palExport()">export as C++</button>
+  <!-- ============================================================ settings -->
+  <section class="tab" id="tab-settings">
+    <div class="card">
+      <h2>WiFi</h2>
+      <div class="hide" id="wifiCard">
+        <div id="netList"></div>
+        <label>Network</label>
+        <input id="ssid" placeholder="SSID">
+        <label>Password</label>
+        <input id="pass" type="password" placeholder="leave blank if open">
+        <div style="height:12px"></div>
+        <button class="primary" onclick="saveWifi()">Join and restart</button>
+        <div style="height:14px"></div>
+      </div>
+      <label><input type="checkbox" id="wifiSleepCfg"> WiFi power save</label>
+      <p class="hint">Off keeps the radio awake rather than waking it for every beacon, for steadier fetching. It costs about 40 mA, which is nothing on mains power.</p>
+      <div style="height:8px"></div>
+      <button class="save" onclick="saveConfig()">Save</button>
+      <div style="height:14px"></div>
+      <button class="danger" onclick="forget()">Forget WiFi</button>
+      <p class="hint">Erases the stored network and restarts into setup mode.</p>
     </div>
-    <textarea id="palOut" class="hide" readonly></textarea>
 
-    <label>Panel shows</label>
-    <div class="lv">
-      <button onclick="setMode('single_chart')">normal</button>
-      <button onclick="setMode('palette_test')">palette</button>
-      <button onclick="setMode('ramp_test')">ramp</button>
+    <div class="card">
+      <h2>Palette</h2>
+      <p class="hint" style="margin-top:0">Colours apply to the panel immediately and are not saved. Switch to the palette screen to see all eleven side by side, or leave it on the chart to judge them in place. Export when you have a set worth keeping.</p>
+      <div class="pal" id="pal"></div>
+      <div class="lv">
+        <button onclick="palReset()">reset to factory</button>
+        <button onclick="palExport()">export as C++</button>
+      </div>
+      <textarea id="palOut" class="hide" readonly></textarea>
+
+      <label>Panel shows</label>
+      <div class="lv">
+        <button onclick="setMode($('mode').value)">normal</button>
+        <button onclick="setMode('palette_test')">palette</button>
+        <button onclick="setMode('ramp_test')">ramp</button>
+      </div>
+      <p class="hint">Ramp values left to right: 255, 180, 130, 95, 70, 50, 35, 25.</p>
+
+      <label>Brightness step</label>
+      <div class="lv" id="levels"></div>
+
+      <label>Isolate flicker sources</label>
+      <div class="lv">
+        <button id="btnFetch" onclick="toggleFetch()">fetching: ?</button>
+        <button id="btnSleep" onclick="toggleSleep()">wifi save: ?</button>
+      </div>
+      <p class="hint">Fetching off stops all exchange polling - four feeds at 30s means a TLS handshake every ~7.5s. WiFi save off keeps the radio awake instead of waking on every beacon. Watch the panel with each off in turn. Nothing here is saved; a reset restores normal operation.</p>
     </div>
-    <p class="hint">Ramp values left to right: 255, 180, 130, 95, 70, 50, 35, 25.</p>
 
-    <label>Brightness step</label>
-    <div class="lv" id="levels"></div>
-
-    <label>Isolate flicker sources</label>
-    <div class="lv">
-      <button id="btnFetch" onclick="toggleFetch()">fetching: ?</button>
-      <button id="btnSleep" onclick="toggleSleep()">wifi save: ?</button>
+    <div class="card">
+      <h2>Maintenance</h2>
+      <label>Firmware (.bin)</label>
+      <input type="file" id="fw" accept=".bin">
+      <div style="height:8px"></div>
+      <button onclick="upload()">Upload and restart</button>
+      <div style="height:14px"></div>
+      <label>CoinGecko API key <span id="keyState" class="chk"></span></label>
+      <input id="cgKey" type="password" placeholder="leave blank to clear">
+      <div style="height:8px"></div>
+      <button onclick="saveApiKey()">Save key</button>
+      <p class="hint">Only needed for coingecko feeds. Its free tier allows roughly 10k calls a month, so keep the poll interval high - coingecko is for coins Binance does not list, not for fast updates. Stored on the device, never sent back to this page.</p>
+      <div style="height:14px"></div>
+      <button onclick="restoreDefaults()">Restore default settings</button>
+      <p class="hint">Resets feeds and display settings to BTC, ETH, SOL, ZEC. WiFi credentials are untouched.</p>
     </div>
-    <p class="hint">Fetching off stops all exchange polling - four feeds at 30s means a TLS handshake every ~7.5s. WiFi save off keeps the radio awake instead of waking on every beacon. Watch the panel with each off in turn. Nothing here is saved; a reset restores normal operation.</p>
-  </div>
-
-  <button class="primary" id="saveAll" onclick="saveConfig()">Save settings</button>
-  <div style="height:12px"></div>
-
-  <div class="card">
-    <h2>Maintenance</h2>
-    <label>Firmware (.bin)</label>
-    <input type="file" id="fw" accept=".bin">
-    <div style="height:8px"></div>
-    <button onclick="upload()">Upload and restart</button>
-    <div style="height:14px"></div>
-    <label>CoinGecko API key <span id="keyState" class="chk"></span></label>
-    <input id="cgKey" type="password" placeholder="leave blank to clear">
-    <div style="height:8px"></div>
-    <button onclick="saveApiKey()">Save key</button>
-    <p class="hint">Only needed for coingecko feeds. Its free tier allows roughly 10k calls a month, so keep the poll interval high - coingecko is for coins Binance does not list, not for fast updates. Stored on the device, never sent back to this page.</p>
-    <div style="height:14px"></div>
-    <button onclick="restoreDefaults()">Restore default settings</button>
-    <p class="hint">Resets feeds and display settings to BTC, ETH, SOL, ZEC. WiFi credentials are untouched.</p>
-    <div style="height:14px"></div>
-    <button class="danger" onclick="forget()">Forget WiFi</button>
-  </div>
+  </section>
 
 </div>
 <div id="toast"></div>
 
 <script>
 let cfg = null;
+
+// Feed limit, from the device's own UPTICK_MAX_FEEDS via /api/status.
+let maxFeeds = 32;
 
 const $ = id => document.getElementById(id);
 
@@ -254,6 +293,7 @@ async function loadStatus() {
     bs.classList.toggle('on', !s.wifiSleep);
   }
   $('ver').textContent = 'v' + s.version;
+  if (s.maxFeeds) maxFeeds = s.maxFeeds;
   if (s.bitDepth) $('panelInfo').textContent = s.bitDepth + '-bit colour at ' + s.refreshHz + ' Hz';
   $('status').textContent = s.mode === 'ap'
     ? 'setup mode - AP ' + s.ssid + ' at ' + s.ip
@@ -269,6 +309,7 @@ async function loadStatus() {
 
   if (s.mode === 'ap') {
     $('wifiCard').classList.remove('hide');
+    if (!setupShown) { setupShown = true; showTab('settings'); }
     scan();
   }
 }
@@ -314,10 +355,15 @@ async function loadConfig() {
   snapshotFeeds();
   $('brightness').value = cfg.brightness;
   $('briVal').textContent = cfg.brightness + '%';
-  $('mode').value        = cfg.mode;
+  $('mode').value        = cfg.mode === 'multi_price' ? 'ticker_vertical' : cfg.mode;
+  if (!$('mode').value) $('mode').value = 'single_chart';
+  modeControls();
   $('dwellSec').value    = cfg.dwellSec;
+  $('scrollSpeed').value = cfg.scrollSpeed || 20;
+  $('pauseSec').value    = cfg.pauseSec || 0;
+  $('pauseVal').textContent = pauseText(+$('pauseSec').value);
+  $('spdVal').textContent = $('scrollSpeed').value + ' px/s';
   $('refreshSec').value  = cfg.refreshSec;
-  $('tz').value          = cfg.tz;
   $('rotate180').checked = cfg.rotate180;
   $('wifiSleepCfg').checked = !!cfg.wifiSleep;
   renderFeeds();
@@ -510,7 +556,7 @@ function renderFeeds() {
 }
 
 function addFeed() {
-  if (cfg.feeds.length >= 8) return toast('8 feeds max', true);
+  if (cfg.feeds.length >= maxFeeds) return toast(maxFeeds + ' feeds max', true);
   cfg.feeds.push({ source:'binance', symbol:'ETHUSDT', label:'ETH', interval:'1h', decimals:2 });
   renderFeeds();
   dirty();
@@ -620,7 +666,7 @@ function importFeeds(input) {
     }
 
     if (!Array.isArray(feeds) || !feeds.length) return toast('no feeds in that file', true);
-    if (feeds.length > 8) return toast('8 feeds max, that file has ' + feeds.length, true);
+    if (feeds.length > maxFeeds) return toast(maxFeeds + ' feeds max, that file has ' + feeds.length, true);
 
     // Validated here rather than trusting the file: a hand-edited export with
     // a missing field would otherwise be rejected by the device with a much
@@ -660,12 +706,58 @@ function liveBrightness() {
   }, 120);
 }
 
+// Mode applies the moment it is picked, through the same live endpoint the
+// palette card uses; Save is what keeps it. Only the controls that mean
+// something in that mode are shown.
+function liveMode() {
+  const m = $('mode').value;
+  modeControls();
+  dirty();
+  fetch('/api/mode', { method:'POST', body: JSON.stringify({ mode: m }) })
+    .then(r => { if (!r.ok) toast('could not switch mode', true); });
+}
+
+function modeControls() {
+  const m = $('mode').value;
+  const show = (cls, on) => document.querySelectorAll('.' + cls)
+                                    .forEach(el => el.classList.toggle('hide', !on));
+  show('forChart',    m === 'single_chart');
+  show('forTicker',   m === 'ticker' || m === 'ticker_vertical');
+  show('forVertical', m === 'ticker_vertical');
+}
+
+const pauseText = v => v ? v + ' s' : 'none - continuous';
+let pauseTimer = null;
+function livePause() {
+  const v = +$('pauseSec').value;
+  $('pauseVal').textContent = pauseText(v);
+  dirty();
+  clearTimeout(pauseTimer);
+  pauseTimer = setTimeout(() => {
+    fetch('/api/pause', { method:'POST', body: JSON.stringify({ pause: v }) });
+  }, 120);
+}
+
+// Same arrangement as brightness: previews live while dragging, persisted
+// only by Save. Visible when the panel is on the ticker.
+let spdTimer = null;
+function liveSpeed() {
+  const v = +$('scrollSpeed').value;
+  $('spdVal').textContent = v + ' px/s';
+  dirty();
+  clearTimeout(spdTimer);
+  spdTimer = setTimeout(() => {
+    fetch('/api/speed', { method:'POST', body: JSON.stringify({ speed: v }) });
+  }, 120);
+}
+
 async function saveConfig() {
   cfg.brightness = +$('brightness').value;
   cfg.mode         = $('mode').value;
   cfg.dwellSec   = +$('dwellSec').value;
+  cfg.scrollSpeed = +$('scrollSpeed').value;
+  cfg.pauseSec   = +$('pauseSec').value;
   cfg.refreshSec = +$('refreshSec').value;
-  cfg.tz         = $('tz').value;
   cfg.rotate180  = $('rotate180').checked;
   cfg.wifiSleep  = $('wifiSleepCfg').checked;
 
@@ -862,8 +954,26 @@ async function forget() {
   toast('restarting into setup mode');
 }
 
+// ---------------------------------------------------------------- tabs
+
+// The tab lives in the URL hash, so a reload lands back on it and a link can
+// point at one. Every Save saves the whole config, so edits on one tab are
+// kept whichever tab's button is pressed.
+const TABS = ['tickers', 'display', 'settings'];
+let setupShown = false;
+
+function showTab(t) {
+  if (!TABS.includes(t)) t = 'tickers';
+  for (const n of TABS) {
+    $('tab-' + n).classList.toggle('on', n === t);
+    document.querySelector('.tabs [data-tab="' + n + '"]').classList.toggle('on', n === t);
+  }
+  if (location.hash !== '#' + t) history.replaceState(null, '', '#' + t);
+}
+
 // ---------------------------------------------------------------- boot
 
+showTab(location.hash.slice(1));
 renderLevels();
 loadStatus()
   .then(loadConfig)

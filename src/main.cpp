@@ -31,8 +31,12 @@ void setup()
 
   // Core 0 owns the radio, the web server and the market fetch. Core 1 owns
   // the display and must never block on network I/O.
-  xTaskCreatePinnedToCore(netTask,     "net",  8192, nullptr, 2, nullptr, 0);
-  xTaskCreatePinnedToCore(displayTask, "disp", 4096, nullptr, 1, nullptr, 1);
+  // Stack sizes are reported as measured minimums in /api/status (stackNet,
+  // stackDisplay), so they can be checked rather than guessed at. The net
+  // task runs TLS handshakes and, on a save, holds a scratch Config plus two
+  // String arrays sized by UPTICK_MAX_FEEDS - about 3 KB at 32 feeds.
+  xTaskCreatePinnedToCore(netTask,     "net",  12288, nullptr, 2, nullptr, 0);
+  xTaskCreatePinnedToCore(displayTask, "disp", 6144,  nullptr, 1, nullptr, 1);
 }
 
 void loop()

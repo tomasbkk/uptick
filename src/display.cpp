@@ -19,6 +19,8 @@ static bool              s_ok         = false;
 static SemaphoreHandle_t s_panelMutex = nullptr;
 static uint16_t          s_refreshHz  = 0;
 static uint8_t           s_taskCore   = 0xFF;
+static volatile uint32_t s_stackFree  = 0;
+static volatile uint32_t s_tickerUs   = 0;
 
 // Brightness last written to the OE bits. setBrightness8 walks the whole of
 // both DMA buffers, so it runs when the value changes, not every frame.
@@ -39,6 +41,8 @@ DisplayStats displayGetStats()
   st.hz       = s_refreshHz;
   st.depth    = PANEL_BIT_DEPTH;
   st.taskCore = s_taskCore;
+  st.stackFree = s_stackFree;
+  st.tickerUs  = s_tickerUs;
   return st;
 }
 
@@ -236,6 +240,34 @@ static void drawTiny(int16_t x, int16_t yTop, const char* s, uint16_t c)
   matrix->setFont(NULL);
 }
 
+// A change figure behind an up or down triangle, in either font - the way an
+// exchange board shows direction, instead of a sign. The 5x7 font has the
+// triangles as CP437 0x1E and 0x1F. TomThumb covers printable ASCII only, so
+// there the triangle is drawn, 5 wide by 3 tall, centred on its 5 px digits.
+static const char ARROW_UP   = 0x1E;
+static const char ARROW_DOWN = 0x1F;
+
+static int16_t arrowPctWidth(const char* digits, bool big)
+{
+  return big ? (int16_t)(strlen(digits) + 1) * BIG_W - 1
+             : 6 + tinyWidth(digits);
+}
+
+static void drawArrowPct(int16_t x, int16_t yTop, const char* digits, bool up, bool big, uint16_t c)
+{
+  if (big)
+  {
+    char s[16];
+    snprintf(s, sizeof(s), "%c%s", up ? ARROW_UP : ARROW_DOWN, digits);
+    drawBig(x, yTop, s, c);
+    return;
+  }
+
+  if (up) matrix->fillTriangle(x + 2, yTop + 1, x, yTop + 3, x + 4, yTop + 3, c);
+  else    matrix->fillTriangle(x, yTop + 1, x + 4, yTop + 1, x + 2, yTop + 3, c);
+  drawTiny(x + 6, yTop, digits, c);
+}
+
 // ---------------------------------------------------------------- numbers
 
 // Inserts thousands separators into the integer part in place, leaving any
@@ -407,42 +439,83 @@ static float displayChange(const Quote& q)
   return q.has24h ? q.change24h : q.changePct;
 }
 
+// Stale means "we tried and could not refresh this", not "this is old". Age
+// alone is a bad signal when polling is gated on what is visible: a feed is
+// only refreshed when its turn comes round, so being a rotation old is the
+// normal schedule working, not a fault.
+//
+// The age term stays only as a catch-all for the case that records no failure
+// at all - the link dropping, so no fetch is ever attempted and the price just
+// ages. The threshold is far beyond anything the rotation can produce, so it
+// cannot fire on healthy operation.
+static bool isStale(const Config& cfg, const Quote& q)
+{
+  const uint32_t rotationMs = (uint32_t)cfg.dwellSec * 1000UL * cfg.feedCount;
+  const uint32_t deadMs     = (uint32_t)cfg.refreshSec * 10000UL + rotationMs * 3;
+  return q.valid && (q.failures > 0 || millis() - q.fetchedMs > deadMs);
+}
+
+// Label and change on one line, the price on the line below: the top half of
+// the chart screen, and a whole entry in the vertical ticker, so the two read
+// alike. Takes 15 rows from yTop - 7, a blank, 7.
+//
+// withCurrency is for the chart screen only. The tickers print figures without
+// a symbol, because a Yahoo feed that has only been batch-fetched does not know
+// its currency, and a list where BTC has a "$" and TSLA does not reads as a
+// mistake.
+static void drawQuoteHeader(const Feed& f, const Quote& q, bool stale, int16_t yTop,
+                            bool withCurrency)
+{
+  const char*    label  = f.label.c_str();
+  const uint16_t cLabel = stale ? C_STALE() : C_LABEL();
+
+  // A quote with neither a 24h figure nor a chart has no change to show, and
+  // printing 0.00% for it would claim a flat day that nobody measured.
+  if (q.has24h || q.count >= 2)
+  {
+    // The number is tinted by the number, the chart by the chart - the two
+    // disagree routinely, and colouring a falling line green to match a
+    // positive 24h figure would be a lie. Direction is the triangle; the
+    // figure itself is unsigned.
+    const float    shown = displayChange(q);
+    const bool     up    = shown >= 0.0f;
+    const uint16_t tint  = up ? C_PCT_UP() : C_PCT_DOWN();
+
+    char pct[16];
+    snprintf(pct, sizeof(pct), "%.2f%%", fabsf(shown));
+
+    // Label left, change right. Both drop to the small font only if they would
+    // collide - a big move like 123.45% is what pushes it over.
+    const int16_t pctW = arrowPctWidth(pct, true);
+    if (bigWidth(label) + pctW + 2 <= PANEL_W)
+    {
+      drawBig(0, yTop, label, cLabel);
+      drawArrowPct(PANEL_W - pctW, yTop, pct, up, true, tint);
+    }
+    else
+    {
+      drawTiny(0, yTop + 1, label, cLabel);
+      drawArrowPct(PANEL_W - arrowPctWidth(pct, false), yTop + 1, pct, up, false, tint);
+    }
+  }
+  else
+  {
+    drawBig(0, yTop, label, cLabel);
+  }
+
+  // One row left blank so the two lines do not touch.
+  drawPriceLine(yTop + 8, q.price, f.decimals, C_PRICE(), withCurrency ? ccyPrefix(q) : "");
+}
+
 static void drawSingleChart(const Config& cfg, const Feed& f, const Quote& q, bool stale)
 {
   matrix->fillScreen(0);
 
-  const float shown = displayChange(q);
+  // Rows 0-14: label, change and price.
+  drawQuoteHeader(f, q, stale, 0, true);
 
-  // The number is tinted by the number, the chart by the chart. These disagree
-  // routinely now - up over a day, down over the last hour - and colouring a
-  // visibly falling line green to match a positive 24h figure would be a lie.
-  const uint16_t tint    = shown >= 0.0f ? C_PCT_UP() : C_PCT_DOWN();
-  const bool     chartUp = q.changePct >= 0.0f;
-
-  char pct[16];
-  snprintf(pct, sizeof(pct), "%+.2f%%", shown);
-
-  // Row 0-6: label left, change right. Drop both to the small font only if
-  // they would collide - a big move like +123.45% is what pushes it over.
-  const char* label  = f.label.c_str();
-  int16_t     labelW = bigWidth(label);
-  int16_t     pctW   = bigWidth(pct);
-
-  if (labelW + pctW + 2 <= PANEL_W)
-  {
-    drawBig(0, 0, label, stale ? C_STALE() : C_LABEL());
-    drawBig(PANEL_W - pctW, 0, pct, tint);
-  }
-  else
-  {
-    drawTiny(0, 1, label, stale ? C_STALE() : C_LABEL());
-    drawTiny(PANEL_W - tinyWidth(pct), 1, pct, tint);
-  }
-
-  // Rows 8-14: price. Row 7 is left blank so the two lines do not touch.
-  drawPriceLine(8, q.price, f.decimals, C_PRICE(), ccyPrefix(q));
-
-  // Rows 16-31: chart. Dark fill, lighter trace along its top edge.
+  // Rows 16-31: chart, coloured by its own window rather than the 24h figure.
+  const bool chartUp = q.changePct >= 0.0f;
   drawChart(q, 16, PANEL_H - 1,
             chartUp ? C_FILL_UP()  : C_FILL_DOWN(),
             chartUp ? C_TRACE_UP() : C_TRACE_DOWN());
@@ -486,36 +559,234 @@ static void drawPaletteTest()
   }
 }
 
-static void drawMultiPrice(const Config& cfg)
+
+// ---------------------------------------------------------------- ticker
+
+// Two tapes crawling right to left, the way an exchange board or a business
+// channel's crawl does. The first half of the feed list runs along the top,
+// the second half along the bottom, so reordering the feeds is how to choose
+// which goes where. A single feed gets one row, centred.
+//
+// Each row is a 16 px section holding two lines of the 5x7 font, 7 + 1 + 7 + 1,
+// so every entry is a small block - label and change above, price below:
+//
+//   BTC ^1.73%   ETH v2.52%
+//   84,434       2,676
+//
+// The change sits behind an up or down triangle coloured by direction. There
+// is no currency symbol: a tape is read as figures, and a prefix would only be
+// right for the feeds priced in dollars. A block is only as wide as its longer
+// line, which makes it around 40% narrower than the same entry on one line -
+// so more of them pass at the same speed.
+//
+// An entry's text is frozen when it enters at the right edge. A price that
+// changed mid-crawl would change the entry's width while it moved and shunt
+// everything behind it; instead the next pass carries the new figure, which is
+// how a real tape behaves. Each row holds only the entries currently in view,
+// and takes the next feed as soon as there is room behind the last one.
+
+static const int16_t TICK_GAP   = 12;   // blank columns between entries
+static const uint8_t TICK_SLOTS = 6;    // most entries a row can have in view
+
+struct TickEntry
+{
+  int16_t  x;               // left edge; negative while it leaves
+  int16_t  w;               // width of the wider line, plus the gap after it
+  char     label[12];
+  char     price[16];
+  char     pct[12];         // triangle included; empty when there is no change figure
+  uint16_t cLabel, cPrice, cPct;
+};
+
+struct TickRow
+{
+  TickEntry e[TICK_SLOTS];
+  uint8_t   count;
+  uint8_t   next;           // next feed to enter, counted from the row's first
+};
+
+static TickRow s_rows[2];
+
+static void tickerReset()
+{
+  memset(s_rows, 0, sizeof(s_rows));
+}
+
+static void tickerEntry(const Config& cfg, uint8_t feed, int16_t x, TickEntry& t)
+{
+  Quote q;
+  {
+    QuoteLock lk;
+    q = g_quotes[feed];
+  }
+
+  const Feed& f = cfg.feeds[feed];
+  t.x      = x;
+  t.cLabel = isStale(cfg, q) ? C_STALE() : C_LABEL();
+  t.cPrice = C_PRICE();
+  t.cPct   = C_DIM();
+  t.pct[0] = 0;
+  snprintf(t.label, sizeof(t.label), "%s", f.label.c_str());
+
+  if (!q.valid)
+  {
+    snprintf(t.price, sizeof(t.price), "--");
+  }
+  else
+  {
+    formatPrice(t.price, sizeof(t.price), q.price, f.decimals, "");
+
+    // The 24h figure where there is one, the chart's own window otherwise -
+    // the same rule every other screen uses. A feed with neither shows none.
+    if (q.has24h || q.count >= 2)
+    {
+      const float chg = displayChange(q);
+      snprintf(t.pct, sizeof(t.pct), "%c%.2f%%", chg >= 0.0f ? ARROW_UP : ARROW_DOWN, fabsf(chg));
+      t.cPct = chg >= 0.0f ? C_PCT_UP() : C_PCT_DOWN();
+    }
+  }
+
+  // The 5x7 font advances 6 px a character, the space before the change
+  // included. The block is as wide as its longer line.
+  const int16_t upper = (int16_t)(strlen(t.label) + (t.pct[0] ? 1 + strlen(t.pct) : 0)) * BIG_W;
+  const int16_t lower = (int16_t)strlen(t.price) * BIG_W;
+  t.w = (upper > lower ? upper : lower) + TICK_GAP;
+}
+
+// Moves one section a pixel left, retires what has left, feeds the right edge
+// and draws what is in view. first and n are its slice of the feed list; yTop
+// is the top of its 16 px band.
+static void tickerRow(const Config& cfg, TickRow& r, uint8_t first, uint8_t n, int16_t yTop)
+{
+  for (uint8_t k = 0; k < r.count; k++) r.e[k].x--;
+
+  while (r.count && r.e[0].x + r.e[0].w <= 0)
+  {
+    memmove(&r.e[0], &r.e[1], sizeof(TickEntry) * (r.count - 1));
+    r.count--;
+  }
+
+  if (n)
+  {
+    if (r.next >= n) r.next = 0;          // the list shrank under us
+
+    // An empty row starts at the left edge, so switching to the ticker shows
+    // something at once rather than waiting for the first entry to crawl in.
+    while (r.count < TICK_SLOTS)
+    {
+      const int16_t at = r.count ? r.e[r.count - 1].x + r.e[r.count - 1].w : 0;
+      if (at > PANEL_W) break;
+
+      tickerEntry(cfg, first + r.next, at, r.e[r.count++]);
+      r.next = (r.next + 1) % n;
+    }
+  }
+
+  for (uint8_t k = 0; k < r.count; k++)
+  {
+    const TickEntry& t = r.e[k];
+
+    drawBig(t.x, yTop, t.label, t.cLabel);
+    if (t.pct[0]) drawBig(t.x + (int16_t)(strlen(t.label) + 1) * BIG_W, yTop, t.pct, t.cPct);
+    drawBig(t.x, yTop + 8, t.price, t.cPrice);
+  }
+}
+
+static void drawTicker(const Config& cfg)
 {
   matrix->fillScreen(0);
 
-  const uint8_t rows = cfg.feedCount < 5 ? cfg.feedCount : 5;
-  for (uint8_t i = 0; i < rows; i++)
+  const uint8_t n = cfg.feedCount;
+  if (n >= 2)
   {
-    Quote q;
-    {
-      QuoteLock lk;
-      q = g_quotes[i];
-    }
-
-    int16_t y = i * 6 + 1;
-    drawTiny(0, y, cfg.feeds[i].label.c_str(), C_LABEL());
-
-    if (!q.valid)
-    {
-      drawTiny(PANEL_W - tinyWidth("--"), y, "--", C_DIM());
-      continue;
-    }
-
-    char buf[20];
-    formatPrice(buf, sizeof(buf), q.price, cfg.feeds[i].decimals, ccyPrefix(q));
-    if (tinyWidth(buf) > PANEL_W - tinyWidth(cfg.feeds[i].label.c_str()) - 3)
-      formatPriceShort(buf, sizeof(buf), q.price, ccyPrefix(q));
-
-    drawTiny(PANEL_W - tinyWidth(buf), y, buf,
-             displayChange(q) >= 0.0f ? C_PCT_UP() : C_PCT_DOWN());
+    // Top takes the odd one out.
+    const uint8_t top = (n + 1) / 2;
+    tickerRow(cfg, s_rows[0], 0,   top,     0);
+    tickerRow(cfg, s_rows[1], top, n - top, 16);
   }
+  else
+  {
+    tickerRow(cfg, s_rows[0], 0, n, 8);
+    s_rows[1].count = 0;                  // so its old entries cannot return
+  }
+}
+
+// ---------------------------------------------------------------- vertical ticker
+
+// The whole feed list rising up the panel and looping, two entries in view.
+// Each entry is the same block as the top of the chart screen - label and
+// change above, price below - 16 rows including the blank row that separates
+// it from the next.
+//
+// With pauseSec at 0 the list crawls continuously at scrollSpeed. With a pause
+// it holds each time an entry reaches the top, then rises one entry and holds
+// again, the way a departure board does - easier to read, since vertical
+// motion moves every character at once where a horizontal crawl brings text
+// in along the direction it is read.
+//
+// Unlike the horizontal tape, entries are drawn live every frame rather than
+// frozen: moving vertically, a price that changes width shifts nothing else.
+
+static const int16_t V_BLOCK = 16;
+
+static uint8_t  s_vTop    = 0;       // feed in the top slot
+static uint8_t  s_vOff    = 0;       // rows the list has risen past it
+static uint32_t s_vHoldTo = 0;       // millis() the current pause ends
+
+static void verticalReset(const Config& cfg)
+{
+  s_vTop    = 0;
+  s_vOff    = 0;
+  s_vHoldTo = millis() + (uint32_t)cfg.pauseSec * 1000UL;
+}
+
+static void drawVerticalEntry(const Config& cfg, uint8_t feed, int16_t yTop)
+{
+  Quote q;
+  {
+    QuoteLock lk;
+    q = g_quotes[feed];
+  }
+
+  const Feed& f = cfg.feeds[feed];
+  if (!q.valid)
+  {
+    drawBig(0, yTop,     f.label.c_str(), C_LABEL());
+    drawBig(0, yTop + 8, "--",            C_DIM());
+    return;
+  }
+  drawQuoteHeader(f, q, isStale(cfg, q), yTop, false);
+}
+
+static void drawVertical(const Config& cfg)
+{
+  matrix->fillScreen(0);
+
+  const uint8_t n = cfg.feedCount;
+  if (!n) return;
+
+  // Two entries fill the panel, so a list that short has nowhere to go.
+  if (n <= 2)
+  {
+    for (uint8_t k = 0; k < n; k++) drawVerticalEntry(cfg, k, n == 1 ? 8 : k * V_BLOCK);
+    return;
+  }
+
+  if (s_vTop >= n) s_vTop = 0;           // the list shrank under us
+
+  const bool holding = cfg.pauseSec && s_vOff == 0 &&
+                       (int32_t)(millis() - s_vHoldTo) < 0;
+  if (!holding && ++s_vOff >= V_BLOCK)
+  {
+    s_vOff    = 0;
+    s_vTop    = (s_vTop + 1) % n;
+    s_vHoldTo = millis() + (uint32_t)cfg.pauseSec * 1000UL;
+  }
+
+  // Three slots: the entry leaving at the top, the one below it, and the one
+  // rising in from the bottom edge. Rows above the panel are clipped.
+  for (uint8_t k = 0; k < 3; k++)
+    drawVerticalEntry(cfg, (s_vTop + k) % n, k * V_BLOCK - s_vOff);
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -593,6 +864,8 @@ bool displayBegin()
   return true;
 }
 
+enum : uint8_t { ANIM_NONE, ANIM_HORIZONTAL, ANIM_VERTICAL };
+
 void displayTask(void* arg)
 {
   (void)arg;
@@ -605,6 +878,9 @@ void displayTask(void* arg)
 
   FrameKey lastKey;
   memset(&lastKey, 0xFF, sizeof(lastKey));
+
+  uint8_t    lastAnim  = ANIM_NONE;
+  TickType_t wake      = xTaskGetTickCount();
 
   // How long the address stays up after joining. Long enough to read and type,
   // short enough not to be annoying on every power cycle.
@@ -689,24 +965,55 @@ void displayTask(void* arg)
     key.apMode    = g_net.apMode;
     key.valid     = q.valid;
 
-    // Stale means "we tried and could not refresh this", not "this is old".
-    // Age alone is a bad signal now that polling is gated on what is visible:
-    // a feed is only refreshed when its turn comes round, so being a rotation
-    // old is the normal schedule working, not a fault.
-    //
-    // The age term stays only as a catch-all for the case that records no
-    // failure at all - the link dropping, so no fetch is ever attempted and
-    // the price just ages. The threshold is far beyond anything the rotation
-    // can produce, so it cannot fire on healthy operation.
-    const uint32_t rotationMs = (uint32_t)cfg.dwellSec * 1000UL * cfg.feedCount;
-    const uint32_t deadMs     = (uint32_t)cfg.refreshSec * 10000UL + rotationMs * 3;
-    const bool     stale      = q.valid &&
-                                (q.failures > 0 || millis() - q.fetchedMs > deadMs);
-
+    const bool stale    = isStale(cfg, q);
     const bool showInfo = !g_net.apMode && (millis() - taskStart < INFO_MS);
 
     key.stale    = stale    ? 1 : 0;
     key.showInfo = showInfo ? 1 : 0;
+
+    // The two tickers are the screens that animate, so they run on their own
+    // clock and skip the change-gating below entirely. They stand aside for
+    // the setup and just-joined screens, which matter more.
+    const uint8_t anim = (g_net.apMode || showInfo)     ? ANIM_NONE
+                       : cfg.mode == "ticker"          ? ANIM_HORIZONTAL
+                       : cfg.mode == "ticker_vertical" ? ANIM_VERTICAL
+                                                       : ANIM_NONE;
+    if (anim != ANIM_NONE)
+    {
+      if (anim != lastAnim)
+      {
+        // Start the tape afresh, and the frame clock with it -
+        // vTaskDelayUntil with a stale reference would otherwise race through
+        // the frames it thinks it missed.
+        if (anim == ANIM_HORIZONTAL) tickerReset();
+        else                         verticalReset(cfg);
+        wake = xTaskGetTickCount();
+      }
+      lastAnim = anim;
+
+      xSemaphoreTake(s_panelMutex, portMAX_DELAY);
+      waitForFlip();
+      const uint32_t t0 = micros();
+      if (anim == ANIM_HORIZONTAL) drawTicker(cfg);
+      else                         drawVertical(cfg);
+      s_tickerUs = micros() - t0;
+      flip();
+      xSemaphoreGive(s_panelMutex);
+
+      // One pixel per frame, so the frame period is what sets the speed.
+      s_stackFree = uxTaskGetStackHighWaterMark(nullptr);
+      const TickType_t period = pdMS_TO_TICKS(1000 / (cfg.scrollSpeed ? cfg.scrollSpeed : 20));
+      vTaskDelayUntil(&wake, period ? period : 1);
+      continue;
+    }
+
+    // Leaving a ticker: the static screen has to be drawn afresh, whether or
+    // not anything in its key has moved since it was last up.
+    if (lastAnim != ANIM_NONE)
+    {
+      lastAnim = ANIM_NONE;
+      memset(&lastKey, 0xFF, sizeof(lastKey));
+    }
 
     // Redraws are still gated on a change, but no longer to protect the
     // refresh - a redraw cannot disturb the DMA chain now. It is simply that a
@@ -722,7 +1029,6 @@ void displayTask(void* arg)
       else if (cfg.mode == "ramp_test")    drawRampTest();
       else if (g_net.apMode)               drawSetup();
       else if (showInfo)                   drawJoined();
-      else if (cfg.mode == "multi_price")  drawMultiPrice(cfg);
       else if (!q.valid)                   drawWaiting(cfg.feeds[feedIdx]);
       else                                 drawSingleChart(cfg, cfg.feeds[feedIdx], q, stale);
 
@@ -730,6 +1036,7 @@ void displayTask(void* arg)
       xSemaphoreGive(s_panelMutex);
     }
 
+    s_stackFree = uxTaskGetStackHighWaterMark(nullptr);
     vTaskDelay(pdMS_TO_TICKS(33));
   }
 }

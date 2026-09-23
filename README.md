@@ -72,13 +72,16 @@ Settings are a single JSON document at `/config.json` on LittleFS, with a `schem
   "wifiSleep": false,
   "mode": "single_chart",
   "dwellSec": 15,
+  "scrollSpeed": 20,
+  "pauseSec": 0,
   "refreshSec": 60,
-  "tz": "Europe/Bratislava",
   "feeds": [
     { "source": "binance", "symbol": "BTCUSDT", "label": "BTC", "interval": "1h", "decimals": 0 }
   ]
 }
 ```
+
+`mode` is `single_chart`, `ticker` (horizontal) or `ticker_vertical`. `ticker_vertical` was called `multi_price` before it scrolled; a config or backup that still says so is translated on load rather than refused, since refusing the stored config at boot would throw the whole document away, feeds included. Keys the firmware no longer uses - `bitDepth`, and `tz`, which was stored but never applied to anything - are ignored for the same reason. Up to 32 feeds (`UPTICK_MAX_FEEDS`); the web page reads the limit from `/api/status` rather than repeating it.
 
 Factory feeds are BTC, ETH, SOL and ZEC on Binance. `decimals: 0` means "pick from magnitude" - whole dollars above $1000, cents below, four places under $1.
 
@@ -121,10 +124,12 @@ Both run entirely in the browser - the page already holds the config, so no endp
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/status` | mode, IP, RSSI, heap, uptime, colour depth and refresh rate, core assignments |
+| GET | `/api/status` | mode, IP, RSSI, heap, uptime, colour depth and refresh rate, core assignments, task stack headroom, ticker frame time, feed limit |
 | GET / POST | `/api/config` | the config document |
 | POST | `/api/brightness` | live brightness, not persisted |
-| POST | `/api/mode` | live display mode, not persisted |
+| POST | `/api/speed` | live scroll speed for both tickers, not persisted |
+| POST | `/api/pause` | live vertical-ticker pause, not persisted |
+| POST | `/api/mode` | live display mode, not persisted; the web page's mode picker uses it, so a mode applies as soon as it is chosen |
 | GET / POST | `/api/palette` | live colour overrides by name, not persisted |
 | POST | `/api/defaults` | restore factory settings, leaving WiFi alone |
 | POST | `/api/apikey` | store the CoinGecko key (write-only) |
@@ -142,6 +147,8 @@ Plain HTTP on the LAN. Do not port-forward it.
 ## Architecture
 
 Core 0 runs the radio, the web server and the market fetch. Core 1 runs the display. Confirmed rather than assumed - `/api/status` reports `coreDisplay` and `coreNet`.
+
+Task stacks are measured, not guessed: `/api/status` reports `stackNet` and `stackDisplay`, the least free stack each task has ever had. The net task has 12 KB because it runs TLS handshakes and, on a save, holds a scratch `Config` plus two `String` arrays sized by the feed limit; measured with 32 feeds it bottoms out with about 5.6 KB free. The display task has 6 KB; the ticker's number formatting costs about 1 KB, and it bottoms out with about 3.3 KB free - on the original 4 KB it would have had 1.3 KB.
 
 `Config` holds `String` members, so copying it deep-copies around forty strings. Both the render loop and the poll loop run far too often to do that per iteration, so `g_cfgRev` is bumped on every change and each reader caches its own copy until the revision moves.
 
@@ -198,7 +205,7 @@ The layout decides how data is fetched.
 
 **Single chart polls only the feed on screen**, one candle request at a time. A feed nobody is looking at does not need a fresh chart, so every fetch lands at a screen transition and the rest of each dwell is quiet. The cost is that effective refresh becomes the rotation period rather than the poll interval.
 
-**Every other layout batches.** The price list - and the scrolling ticker to come - shows a price and a change per feed and no chart, which is what the batch endpoints return. One request per source replaces one per feed, every poll interval:
+**Both tickers batch.** They show a price and a change per feed and no chart, which is what the batch endpoints return. One request per source replaces one per feed, every poll interval:
 
 | Source | Batch request | Per request |
 | --- | --- | --- |
@@ -230,7 +237,7 @@ Every request is made with `useHTTP10(true)`. The parsers read `getStream()` raw
 64 x 32 is tight. Row budget for `single_chart`:
 
 ```
-rows  0-6    BTC            +4.37%     5x7 font, 6px advance
+rows  0-6    BTC            ▲4.37%     5x7 font, 6px advance
 row   7      blank
 rows  8-14   $214,460                  price
 row   15     blank
@@ -239,9 +246,44 @@ rows 16-31   chart, 64 cols
 
 `$214,460.00` is 66 px in the 5x7 font - one pixel too wide. The price line steps down a ladder: full precision in the 5x7 font, then TomThumb 3x5 at 4 px advance, then a `$214.4K` abbreviation. Thousands separators are inserted into the integer part only.
 
+Direction is shown by a triangle, not a sign - the same as the ticker - with the figure itself unsigned. When the label and change are too wide for the 5x7 font the line drops to TomThumb, which covers printable ASCII only, so there the triangle is drawn as a shape, 5 wide by 3 tall, centred on the small digits.
+
 Text wrapping is turned off. Adafruit_GFX wraps using the glyph advance rather than its ink, so a right-aligned string ending flush at column 63 still trips the check, and that last character gets redrawn at x=0 on the following line in its own colour - which showed up as the percentage's green painted through the `$` of the price.
 
 The chart scales to the min/max of the visible window, never to zero, or intraday moves would render as a flat line. The trace runs along the fill's top edge as a staircase, never as a line between column centres: `drawLine` spreads a steep move across both columns, so half of it lands above the previous column's fill as stray pixels floating over the chart.
+
+### Ticker
+
+Two tapes crawling right to left, the way an exchange board or a business channel's crawl does. Each is a 16 px section holding two lines of the 5x7 font - 7 + 1 + 7 + 1 - so every entry is a small block, label and change above and price below:
+
+```
+rows  0-15   BTC ▲1.73%   ETH ▼2.52%   SOL ▼2.2      first half of the feeds
+             84,434       2,676        114.78
+rows 16-31   TSLA ▲0.44%  SPCX ▼1.58%  EOSE ▲        second half
+             380.56       152.27       3.685
+```
+
+The first half of the feed list runs along the top and the second half along the bottom, with the odd one out on top, so reordering the feeds is how to choose which section a feed is in - crypto above and stocks below, say. A single feed gets one section, centred. The change sits behind a triangle coloured by direction; CP437 `0x1E` and `0x1F` in the built-in font are solid up and down triangles. There is no currency symbol: a tape is read as figures, and a prefix would only be right for the feeds priced in dollars.
+
+A block is only as wide as its longer line, which makes it around 40% narrower than the same entry on one line, so more of them pass at the same speed.
+
+An entry's text is frozen when it enters at the right edge. A price that changed mid-crawl would change the block's width while it moved and shunt everything behind it, so the next pass carries the new figure instead - which is how a real tape behaves. Each section holds only the entries in view, retiring them as they leave on the left and taking the next feed as soon as there is room behind the last.
+
+The tape moves one pixel a frame, so `scrollSpeed` (pixels per second, 10-90, default 20) is also its frame rate, paced with `vTaskDelayUntil` so it holds steady. The web page sets it with a slider that previews live through `/api/speed`, like brightness, and Save keeps it. 30 read as a little fast on the real panel with both sections moving. Much below 15 the motion starts to look stepped, because each step is a whole pixel.
+
+Measured on the device with 32 feeds: a frame draws in about 0.75 ms, a few percent of its budget at any speed the slider allows, reported as `tickerDrawUs` in `/api/status`. Frames are drawn to the back buffer and flipped with the two-frame guard described under double buffering. The ticker is the one screen that bypasses `FrameKey` gating; it stands aside for the setup and just-joined screens.
+
+It uses batch fetching, so thirty feeds cost two or three requests a poll cycle.
+
+### Vertical ticker
+
+The whole feed list rising up the panel and looping, two entries in view. Each entry is the same block as the top of the chart screen - label and change on one line, price below - drawn by the same `drawQuoteHeader`, so the two screens read alike. The tickers print figures without a currency symbol, because a Yahoo feed that has only been batch-fetched does not know its currency, and a list where BTC has a `$` and TSLA does not reads as a mistake. The chart screen keeps it.
+
+With `pauseSec` at 0 the list crawls continuously at `scrollSpeed`. With a pause it holds each time an entry reaches the top, then rises one entry and holds again, the way a departure board does. That is easier to read: vertical motion moves every character at once, where a horizontal crawl brings text in along the direction it is read.
+
+Unlike the horizontal tape, entries are drawn live every frame rather than frozen - moving vertically, a price that changes width shifts nothing else. Rows above the panel are clipped by the driver: its pixel path takes unsigned coordinates, so -1 wraps past the height check, and its line paths test for negatives explicitly. A frame draws in about 1.5 ms.
+
+A list of one or two fits the panel as it is and does not move.
 
 ### The percentage is always 24h
 
@@ -316,11 +358,10 @@ It is RF, not bus contention. Changing edge speed at a fixed clock changed the r
 
 ## Status
 
-Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, Binance / Coinbase / CoinGecko / Yahoo adapters, display-gated polling, feed reordering and export/import.
+Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, two-section scrolling ticker, tabbed web UI, Binance / Coinbase / CoinGecko / Yahoo adapters with batch fetching, symbol checks on save, up to 32 feeds, feed reordering and export/import.
 
 Ideas, roughly in order of value:
 
-- **Scrolling ticker mode** for large feed lists - `BTC 84,434 -1.7%` scrolling past rather than one feed per page. Batch fetching is in place; it needs a higher feed limit.
 - Buttons for feed cycling, LIS3DH tap-to-advance and orientation
 - ESP Web Tools + Improv for browser flashing and provisioning
 - A second PlatformIO environment for plain ESP32 boards (needs a pin remap and a 4 MB partition table)

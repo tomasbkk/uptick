@@ -1,4 +1,5 @@
 #include "uptick.h"
+#include "pins.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -66,6 +67,13 @@ static void handleStatus()
   d["coreDisplay"] = ds.taskCore;
   d["coreNet"]     = xPortGetCoreID();
 
+  // Least free stack each task has ever had, in bytes. Worth watching after
+  // anything that grows what the tasks hold - the feed limit above all.
+  d["stackNet"]     = uxTaskGetStackHighWaterMark(nullptr);
+  d["stackDisplay"] = ds.stackFree;
+  d["tickerDrawUs"] = ds.tickerUs;
+  d["maxFeeds"]     = UPTICK_MAX_FEEDS;
+
   String out;
   serializeJson(d, out);
   sendJson(200, out);
@@ -104,6 +112,44 @@ static void handleBrightness()
     g_cfgRev++;
   }
   sendOk();   // deliberately not persisted; the config POST is what saves
+}
+
+// Live ticker speed, for the slider - the same arrangement as brightness:
+// applied at once so the crawl can be judged while dragging, and persisted
+// only by the config POST.
+static void handleSpeed()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+  if (d["speed"].isNull())                   { sendErr(400, "missing speed"); return; }
+
+  const uint8_t v = constrain((int)d["speed"], SCROLL_PPS_MIN, SCROLL_PPS_MAX);
+  {
+    CfgLock lk;
+    g_cfg.scrollSpeed = v;
+    g_cfgRev++;
+  }
+  sendOk();
+}
+
+// Live vertical-ticker pause, for its slider - as speed and brightness.
+static void handlePause()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+  if (d["pause"].isNull())                   { sendErr(400, "missing pause"); return; }
+
+  const uint8_t v = constrain((int)d["pause"], 0, PAUSE_SEC_MAX);
+  {
+    CfgLock lk;
+    g_cfg.pauseSec = v;
+    g_cfgRev++;
+  }
+  sendOk();
 }
 
 // Diagnostic: what is actually on LittleFS. An empty list with a plausible
@@ -150,7 +196,9 @@ static void handleMode()
   if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
 
   String m = d["mode"] | "";
-  if (m != "single_chart" && m != "multi_price" && m != "palette_test" && m != "ramp_test")
+  if (m == "multi_price") m = "ticker_vertical";   // the old name, as in config.cpp
+  if (m != "single_chart" && m != "ticker" && m != "ticker_vertical" &&
+      m != "palette_test" && m != "ramp_test")
   {
     sendErr(400, "unknown mode");
     return;
@@ -590,6 +638,8 @@ void netBegin()
   http.on("/api/config",     HTTP_GET,  handleGetConfig);
   http.on("/api/config",     HTTP_POST, handlePostConfig);
   http.on("/api/brightness", HTTP_POST, handleBrightness);
+  http.on("/api/speed",      HTTP_POST, handleSpeed);
+  http.on("/api/pause",      HTTP_POST, handlePause);
   http.on("/api/mode",       HTTP_POST, handleMode);
   http.on("/api/defaults",   HTTP_POST, handleDefaults);
   http.on("/api/apikey",     HTTP_POST, handleApiKey);

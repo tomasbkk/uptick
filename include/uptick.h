@@ -2,9 +2,9 @@
 #include <Arduino.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.15.0"
+#define UPTICK_VERSION   "0.17.0"
 #define UPTICK_SCHEMA    1
-#define UPTICK_MAX_FEEDS 8
+#define UPTICK_MAX_FEEDS 32
 
 // One chart point per panel column, so nothing ever needs resampling.
 #define UPTICK_MAX_POINTS 64
@@ -26,10 +26,11 @@ struct Config
   uint8_t  brightness;   // 1-100, applied as OE duty cycle
   bool     rotate180;
   bool     wifiSleep;    // radio power save; off measurably steadies the panel
-  String   mode;         // "single_chart" | "multi_price"
+  String   mode;         // "single_chart" | "ticker" | "ticker_vertical"
   uint16_t dwellSec;     // seconds per feed when cycling
+  uint8_t  scrollSpeed;  // both tickers, pixels per second
+  uint8_t  pauseSec;     // vertical ticker: hold at each entry, 0 = continuous
   uint16_t refreshSec;   // market data poll interval, per feed
-  String   tz;
   uint8_t  feedCount;
   Feed     feeds[UPTICK_MAX_FEEDS];
 };
@@ -158,11 +159,16 @@ uint16_t displayRefreshHz();
 int displayVisibleFeed();
 
 // Cores are reported to confirm the task split rather than assume it.
+// stackFree is the least free stack the render task has ever had, in bytes.
+// tickerUs is how long the last ticker frame took to draw, against a budget of
+// 1000000 / scrollSpeed - an overrun would quietly slow the crawl.
 struct DisplayStats
 {
   uint16_t hz;
   uint8_t  depth;
   uint8_t  taskCore;
+  uint32_t stackFree;
+  uint32_t tickerUs;
 };
 DisplayStats displayGetStats();
 

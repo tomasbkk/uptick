@@ -19,8 +19,9 @@ void configDefaults(Config& c)
   c.wifiSleep  = false;
   c.mode         = "single_chart";
   c.dwellSec   = 15;
+  c.scrollSpeed = SCROLL_PPS_DEFAULT;
+  c.pauseSec    = PAUSE_SEC_DEFAULT;
   c.refreshSec = POLL_SEC_DEFAULT;
-  c.tz         = "Europe/Bratislava";
   // Factory feeds. decimals 0 means "pick from magnitude", which gives whole
   // dollars above 1000 and cents below, so it suits all four.
   c.feedCount  = 4;
@@ -60,8 +61,9 @@ String configToJson()
     d["wifiSleep"]  = g_cfg.wifiSleep;
     d["mode"]         = g_cfg.mode;
     d["dwellSec"]   = g_cfg.dwellSec;
+    d["scrollSpeed"] = g_cfg.scrollSpeed;
+    d["pauseSec"]    = g_cfg.pauseSec;
     d["refreshSec"] = g_cfg.refreshSec;
-    d["tz"]         = g_cfg.tz;
 
     JsonArray feeds = d["feeds"].to<JsonArray>();
     for (uint8_t i = 0; i < g_cfg.feedCount; i++)
@@ -84,18 +86,25 @@ bool configFromJson(const String& body, String& err)
   configDefaults(c);
 
   c.schema     = UPTICK_SCHEMA;
-  // A "bitDepth" key from an older config is ignored rather than rejected:
-  // depth is fixed by the build now, and refusing the whole document over it
-  // would lose everything else in a backup restore.
+  // "bitDepth" and "tz" keys from an older config are ignored rather than
+  // rejected: depth is fixed by the build now, and the timezone was never used
+  // for anything. Refusing the whole document over either would lose
+  // everything else in a backup restore.
   c.brightness = constrain((int)(d["brightness"] | PANEL_BRIGHTNESS_DEFAULT), 1, 100);
   c.rotate180  = d["rotate180"] | false;
   c.wifiSleep  = d["wifiSleep"] | false;
   c.mode         = d["mode"]         | "single_chart";
   c.dwellSec   = constrain((int)(d["dwellSec"]   | 15), 3, 3600);
+  c.scrollSpeed = constrain((int)(d["scrollSpeed"] | SCROLL_PPS_DEFAULT), SCROLL_PPS_MIN, SCROLL_PPS_MAX);
+  c.pauseSec    = constrain((int)(d["pauseSec"] | PAUSE_SEC_DEFAULT), 0, PAUSE_SEC_MAX);
   c.refreshSec = constrain((int)(d["refreshSec"] | POLL_SEC_DEFAULT), 10, 3600);
-  c.tz         = d["tz"] | "UTC";
 
-  if (c.mode != "single_chart" && c.mode != "multi_price" &&
+  // "multi_price" is what the vertical ticker was called before it scrolled.
+  // A stored config or backup that still says so is translated, not refused -
+  // refusing it at boot would throw the whole document away, feeds included.
+  if (c.mode == "multi_price") c.mode = "ticker_vertical";
+
+  if (c.mode != "single_chart" && c.mode != "ticker" && c.mode != "ticker_vertical" &&
       c.mode != "palette_test" && c.mode != "ramp_test") {
     err = "unknown mode";
     return false;
