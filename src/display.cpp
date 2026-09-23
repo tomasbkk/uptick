@@ -154,22 +154,27 @@ static const char* const PAL_NAMES[P_COUNT] = {
   "DIM", "ACCENT", "STALE", "DIVIDER"
 };
 
+// Tuned on the panel with the palette pickers and exported from the web page.
 static const Rgb PAL_FACTORY[P_COUNT] = {
-  { 255, 255, 255 },   // LABEL      - symbol, top left
+  { 238, 255,   0 },   // LABEL      - symbol, top left
   { 255, 255, 255 },   // PRICE      - price line
-  {  40, 220,  90 },   // PCT_UP     - percentage when rising
-  { 240,  70,  60 },   // PCT_DOWN   - percentage when falling
-  {  40, 220,  90 },   // FILL_UP    - chart fill when rising
-  {  90, 255, 150 },   // TRACE_UP   - chart trace when rising
-  { 240,  70,  60 },   // FILL_DOWN  - chart fill when falling
-  { 255, 150, 140 },   // TRACE_DOWN - chart trace when falling
+  {  40, 220,  90 },   // PCT_UP     - percent, rising
+  { 240,  70,  60 },   // PCT_DOWN   - percent, falling
+  {   0,  82,  23 },   // FILL_UP    - chart fill, rising
+  {   0, 255,  94 },   // TRACE_UP   - chart trace, rising
+  {  66,   0,   0 },   // FILL_DOWN  - chart fill, falling
+  { 255,   0,   0 },   // TRACE_DOWN - chart trace, falling
   { 110, 120, 130 },   // DIM        - secondary text
   {  60, 140, 255 },   // ACCENT     - setup screens
-  { 230, 160,  40 },   // STALE      - label when data is old
-  {  60,  60,  60 }    // DIVIDER    - line between the ticker's sections; black hides it
+  { 230, 160,  40 },   // STALE      - old data
+  {   3,   1, 116 },   // DIVIDER    - ticker section line, black hides it
 };
 
+// Starts at factory before anything else runs. The stored config is loaded -
+// and its saved colours applied - before the panel is brought up, so the
+// palette cannot wait for displayBegin() to initialise it.
 static Rgb      s_pal[P_COUNT];
+static const bool s_palInit __attribute__((unused)) = []() { memcpy(s_pal, PAL_FACTORY, sizeof(s_pal)); return true; }();
 static uint32_t s_palRev = 1;
 
 uint8_t     displayPaletteCount()          { return P_COUNT; }
@@ -179,6 +184,12 @@ void displayPaletteGet(uint8_t i, uint8_t& r, uint8_t& g, uint8_t& b)
 {
   if (i >= P_COUNT) { r = g = b = 0; return; }
   r = s_pal[i].r; g = s_pal[i].g; b = s_pal[i].b;
+}
+
+void displayPaletteFactory(uint8_t i, uint8_t& r, uint8_t& g, uint8_t& b)
+{
+  if (i >= P_COUNT) { r = g = b = 0; return; }
+  r = PAL_FACTORY[i].r; g = PAL_FACTORY[i].g; b = PAL_FACTORY[i].b;
 }
 
 bool displayPaletteSet(const char* name, uint8_t r, uint8_t g, uint8_t b)
@@ -843,7 +854,6 @@ bool displayBegin()
   s_ok        = true;
   s_refreshHz = (uint16_t)matrix->calculated_refresh_rate;
   s_frameUs   = s_refreshHz ? 1000000UL / s_refreshHz : 10000;
-  displayPaletteReset();
 
   uint8_t bri;
   {

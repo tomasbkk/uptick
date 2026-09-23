@@ -86,6 +86,51 @@ static void feedFromJson(JsonObjectConst o, Feed& f)
   if (f.label.isEmpty()) f.label = autoLabel(f);
 }
 
+// The palette is stored as the colours that differ from factory, by name -
+// "LABEL": "#eeff00". Only those, so a colour nobody changed follows the
+// factory set if that is ever retuned. The palette itself lives in display.cpp;
+// the config only carries it to and from flash.
+static void paletteToJson(JsonObject o)
+{
+  for (uint8_t i = 0; i < displayPaletteCount(); i++)
+  {
+    uint8_t r, g, b, fr, fg, fb;
+    displayPaletteGet(i, r, g, b);
+    displayPaletteFactory(i, fr, fg, fb);
+    if (r == fr && g == fg && b == fb) continue;
+
+    char hex[8];
+    snprintf(hex, sizeof(hex), "#%02x%02x%02x", r, g, b);
+    o[displayPaletteName(i)] = hex;
+  }
+}
+
+static bool parseHex(const char* s, uint8_t& r, uint8_t& g, uint8_t& b)
+{
+  if (!s || s[0] != '#' || strlen(s) != 7) return false;
+  char* end = nullptr;
+  const unsigned long v = strtoul(s + 1, &end, 16);
+  if (*end) return false;
+  r = (uint8_t)(v >> 16);
+  g = (uint8_t)(v >> 8);
+  b = (uint8_t)v;
+  return true;
+}
+
+// A document with no palette means factory, so what is on flash always says
+// exactly what the panel shows. Unknown names and malformed colours are
+// skipped rather than refused - they cannot be worth losing a config over.
+static void paletteFromJson(JsonObjectConst o)
+{
+  displayPaletteReset();
+  for (JsonPairConst kv : o)
+  {
+    uint8_t r, g, b;
+    if (parseHex(kv.value().as<const char*>(), r, g, b))
+      displayPaletteSet(kv.key().c_str(), r, g, b);
+  }
+}
+
 String configToJson()
 {
   JsonDocument d;
@@ -105,6 +150,8 @@ String configToJson()
     for (uint8_t i = 0; i < g_cfg.feedCount; i++)
       feedToJson(g_cfg.feeds[i], feeds.add<JsonObject>());
   }
+  paletteToJson(d["palette"].to<JsonObject>());
+
   String out;
   serializeJson(d, out);
   return out;
@@ -222,6 +269,8 @@ bool configFromJson(const String& body, String& err)
   // rather than carried: the worst case is one early refetch, against a feed
   // that never comes due because it inherited a recent timestamp.
   marketConfigChanged();
+
+  paletteFromJson(d["palette"].as<JsonObjectConst>());
 
   // Applied to RAM regardless - the panel and the poller pick it up either
   // way. Only persistence can fail here, and saying so is the difference

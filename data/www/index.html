@@ -64,7 +64,16 @@
   #toast.bad { border-color:var(--down); color:var(--down); }
   .hide { display:none; }
   .hint { color:var(--dim); font-size:11px; margin:10px 0 0; }
-  .dirty .save { box-shadow:0 0 0 2px var(--accent); }
+  /* One save bar for every tab. It only appears when something is unsaved,
+     and pushes the toast up so the two never overlap. */
+  #saveBar { display:none; position:fixed; left:0; right:0; bottom:0; z-index:5;
+             align-items:center; justify-content:space-between; gap:12px;
+             padding:10px max(16px, calc((100% - 640px) / 2));
+             background:var(--card); border-top:1px solid var(--accent); }
+  #saveBar button { width:auto; padding:8px 22px; }
+  .dirty #saveBar { display:flex; }
+  .dirty .wrap { padding-bottom:64px; }
+  .dirty #toast { bottom:76px; }
   .tabs { display:flex; margin:0 0 12px; border-bottom:1px solid var(--line); }
   .tabs button { flex:1; width:auto; background:none; border:none; border-radius:0;
                  border-bottom:2px solid transparent; margin-bottom:-1px;
@@ -117,7 +126,6 @@
       <div id="feeds"></div>
       <div class="row">
         <button onclick="addFeed()">+ Add Ticker</button>
-        <button class="primary save" onclick="saveConfig()">Save</button>
         <button onclick="exportFeeds()">Export</button>
         <button onclick="$('importFile').click()">Import</button>
         <input type="file" id="importFile" accept="application/json,.json"
@@ -153,28 +161,12 @@
       </div>
       <p class="hint">Mode and the sliders apply to the panel straight away - save to keep them across a restart.</p>
 
-      <div class="row">
-        <div class="forChart">
-          <label>Seconds per feed</label>
-          <input id="dwellSec" type="number" min="3" max="3600">
-        </div>
-        <div>
-          <label>Price poll</label>
-          <select id="refreshSec">
-            <option value="30">every 30s</option>
-            <option value="60">every 60s</option>
-            <option value="120">every 2 min</option>
-            <option value="180">every 3 min</option>
-          </select>
-        </div>
+      <div class="forChart">
+        <label>Seconds per feed</label>
+        <input id="dwellSec" type="number" min="3" max="3600">
       </div>
 
       <label><input type="checkbox" id="rotate180"> rotate 180 degrees</label>
-
-      <div style="height:12px"></div>
-      <button class="primary save" onclick="saveConfig()">Save settings</button>
-
-      <p class="hint">Single + chart fetches only the feed on screen, as its turn comes up; both tickers fetch every feed in one request per source - Binance, CoinGecko and up to 20 Yahoo tickers each take one - so the poll interval costs the same at thirty feeds as at three.</p>
       <p class="hint">The percentage is always the 24 hour change, whatever span the chart covers - so it stays comparable between feeds. The chart is coloured by its own direction, so the two can disagree.</p>
       <p class="hint">Panel: <span id="panelInfo">-</span>. Refresh runs on DMA with no CPU involved, so nothing the device does can make it flicker. Colour depth is fixed by the firmware build.</p>
     </div>
@@ -194,18 +186,38 @@
         <button class="primary" onclick="saveWifi()">Join and restart</button>
         <div style="height:14px"></div>
       </div>
-      <label><input type="checkbox" id="wifiSleepCfg"> WiFi power save</label>
+      <label><input type="checkbox" id="wifiSleepCfg" onchange="liveSleep()"> WiFi power save</label>
       <p class="hint">Off keeps the radio awake rather than waking it for every beacon, for steadier fetching. It costs about 40 mA, which is nothing on mains power.</p>
-      <div style="height:8px"></div>
-      <button class="save" onclick="saveConfig()">Save</button>
       <div style="height:14px"></div>
       <button class="danger" onclick="forget()">Forget WiFi</button>
       <p class="hint">Erases the stored network and restarts into setup mode.</p>
     </div>
 
     <div class="card">
+      <h2>Market data</h2>
+      <label>Price poll</label>
+      <select id="refreshSec">
+        <option value="30">every 30s</option>
+        <option value="60">every 60s</option>
+        <option value="120">every 2 min</option>
+        <option value="180">every 3 min</option>
+      </select>
+      <p class="hint">Single + chart fetches only the feed on screen, as its turn comes up; both tickers fetch every feed in one request per source - Binance, CoinGecko and up to 20 Yahoo tickers each take one - so the poll interval costs the same at thirty feeds as at three.</p>
+
+      <div style="height:10px"></div>
+      <button id="btnFetch" onclick="toggleFetch()">Pause fetching</button>
+      <p class="hint">Stops every price request until resumed or the device restarts. Not saved.</p>
+
+      <label>CoinGecko API key <span id="keyState" class="chk"></span></label>
+      <input id="cgKey" type="password" placeholder="leave blank to clear">
+      <div style="height:8px"></div>
+      <button onclick="saveApiKey()">Save key</button>
+      <p class="hint">Only needed for coingecko feeds. Its free tier allows roughly 10k calls a month, so keep the poll interval high - coingecko is for coins Binance does not list, not for fast updates. Stored on the device, never sent back to this page.</p>
+    </div>
+
+    <div class="card">
       <h2>Palette</h2>
-      <p class="hint" style="margin-top:0">Colours apply to the panel immediately and are not saved. Switch to the palette screen to see all twelve side by side, or leave it on the chart to judge them in place. Export when you have a set worth keeping.</p>
+      <p class="hint" style="margin-top:0">Colours apply to the panel immediately; save to keep them. Reset to factory brings back the defaults. Switch to the palette screen to see all twelve side by side, or leave it on a ticker or the chart to judge them in place.</p>
       <div class="pal" id="pal"></div>
       <div class="lv">
         <button onclick="palReset()">reset to factory</button>
@@ -223,13 +235,6 @@
 
       <label>Brightness step</label>
       <div class="lv" id="levels"></div>
-
-      <label>Isolate flicker sources</label>
-      <div class="lv">
-        <button id="btnFetch" onclick="toggleFetch()">fetching: ?</button>
-        <button id="btnSleep" onclick="toggleSleep()">wifi save: ?</button>
-      </div>
-      <p class="hint">Fetching off stops all exchange polling - four feeds at 30s means a TLS handshake every ~7.5s. WiFi save off keeps the radio awake instead of waking on every beacon. Watch the panel with each off in turn. Nothing here is saved; a reset restores normal operation.</p>
     </div>
 
     <div class="card">
@@ -239,17 +244,15 @@
       <div style="height:8px"></div>
       <button onclick="upload()">Upload and restart</button>
       <div style="height:14px"></div>
-      <label>CoinGecko API key <span id="keyState" class="chk"></span></label>
-      <input id="cgKey" type="password" placeholder="leave blank to clear">
-      <div style="height:8px"></div>
-      <button onclick="saveApiKey()">Save key</button>
-      <p class="hint">Only needed for coingecko feeds. Its free tier allows roughly 10k calls a month, so keep the poll interval high - coingecko is for coins Binance does not list, not for fast updates. Stored on the device, never sent back to this page.</p>
-      <div style="height:14px"></div>
       <button onclick="restoreDefaults()">Restore default settings</button>
-      <p class="hint">Resets feeds and display settings to BTC, ETH, SOL, ZEC. WiFi credentials are untouched.</p>
+      <p class="hint">Resets tickers, display settings and colours to factory - BTC, ETH, SOL, ZEC. WiFi credentials are untouched.</p>
     </div>
   </section>
 
+</div>
+<div id="saveBar">
+  <span>Unsaved changes</span>
+  <button class="primary" onclick="saveConfig()">Save</button>
 </div>
 <div id="toast"></div>
 
@@ -283,14 +286,10 @@ async function loadStatus() {
   const s = await api('/api/status');
   lastStatus = s;
 
-  const bf = $('btnFetch'), bs = $('btnSleep');
+  const bf = $('btnFetch');
   if (bf) {
-    bf.textContent = 'fetching: ' + (s.fetchPaused ? 'OFF' : 'on');
-    bf.classList.toggle('on', !!s.fetchPaused);
-  }
-  if (bs) {
-    bs.textContent = 'wifi save: ' + (s.wifiSleep ? 'on' : 'OFF');
-    bs.classList.toggle('on', !s.wifiSleep);
+    bf.textContent = s.fetchPaused ? 'Resume fetching - paused now' : 'Pause fetching';
+    bf.classList.toggle('danger', !!s.fetchPaused);
   }
   $('ver').textContent = 'v' + s.version;
   if (s.maxFeeds) maxFeeds = s.maxFeeds;
@@ -367,10 +366,12 @@ async function loadConfig() {
   $('rotate180').checked = cfg.rotate180;
   $('wifiSleepCfg').checked = !!cfg.wifiSleep;
   renderFeeds();
+  dirty(false);                // the page now matches the device
 }
 
 // 64 candles fill the panel's 64 columns, so the candle size sets how far back
-// the chart reaches. This is NOT the poll rate - that is "Price poll" below.
+// the chart reaches. This is NOT the poll rate - that is "Price poll" under
+// Settings > Market data.
 const SPANS = {
   '5m':  '5h chart',
   '15m': '16h chart',
@@ -732,6 +733,7 @@ let briTimer = null;
 function liveBrightness() {
   const v = +$('brightness').value;
   $('briVal').textContent = v + '%';
+  dirty();
   clearTimeout(briTimer);
   briTimer = setTimeout(() => {
     fetch('/api/brightness', { method:'POST', body: JSON.stringify({ brightness: v }) });
@@ -815,6 +817,7 @@ async function saveConfig() {
   // A label left blank is made from the symbol - done only now the symbols
   // have passed, so a label is never made from a typo that then gets corrected.
   for (const f of cfg.feeds) if (!f.label.trim()) f.label = autoLabel(f);
+  cfg.palette = { ...palette };     // the device keeps what differs from factory
 
   try {
     await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
@@ -851,21 +854,12 @@ const PAL_DESC = {
 let palette = {};
 let palTimer = null;
 
+// The pickers show what the panel shows. The palette is saved on the device
+// now, with everything else, so the picks this page used to keep in the
+// browser are cleared rather than pushed back over it.
 async function palLoad() {
-  // Local picks win over the device, so a reboot does not throw away tuning.
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem('uptick.palette.v2') || 'null'); } catch (e) {}
-
+  try { localStorage.removeItem('uptick.palette.v2'); } catch (e) {}
   palette = await api('/api/palette');
-  if (saved) {
-    // Only names the firmware still knows about - the set was renamed once.
-    const known = {};
-    PAL_KEYS.forEach(k => { if (saved[k]) known[k] = saved[k]; });
-    if (Object.keys(known).length) {
-      palette = Object.assign(palette, known);
-      palPush(known);
-    }
-  }
   palRender();
 }
 
@@ -885,7 +879,7 @@ function palRender() {
 
 function palSet(key, hex) {
   palette[key] = hex;
-  try { localStorage.setItem('uptick.palette.v2', JSON.stringify(palette)); } catch (e) {}
+  dirty();
 
   // Debounced: a colour input fires continuously while dragging.
   clearTimeout(palTimer);
@@ -898,10 +892,10 @@ function palPush(obj) {
 
 async function palReset() {
   await palPush({ reset: true });
-  try { localStorage.removeItem('uptick.palette.v2'); } catch (e) {}
   palette = await api('/api/palette');
   palRender();
-  toast('palette back to factory');
+  dirty();
+  toast('factory colours - save to keep them');
 }
 
 function palExport() {
@@ -936,6 +930,7 @@ function renderLevels() {
 }
 
 function setLevel(v) {
+  if (+$('brightness').value !== v) dirty();
   $('brightness').value = v;
   $('briVal').textContent = v + '%';
   document.querySelectorAll('#levels button')
@@ -951,10 +946,11 @@ function toggleFetch() {
     .then(loadStatus);
 }
 
-function toggleSleep() {
-  const next = !lastStatus.wifiSleep;
-  fetch('/api/wifisleep', { method:'POST', body: JSON.stringify({ sleep: next }) })
-    .then(loadStatus);
+// Power save takes effect as soon as it is ticked, like everything else on
+// the page that can; Save is what keeps it across a restart.
+function liveSleep() {
+  fetch('/api/wifisleep', { method:'POST',
+                            body: JSON.stringify({ sleep: $('wifiSleepCfg').checked }) });
 }
 
 function setMode(m) {
@@ -990,6 +986,7 @@ async function restoreDefaults() {
     await api('/api/defaults', { method:'POST' });
     toast('defaults restored');
     await loadConfig();
+    await palLoad();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -998,6 +995,21 @@ async function forget() {
   await fetch('/api/forget', { method:'POST' });
   toast('restarting into setup mode');
 }
+
+// ---------------------------------------------------------------- unsaved
+
+// Everything Save stores. Editing any of it - here or in any feed row, rows
+// added later included - raises the save bar. Live-only controls (palette,
+// panel test screens, fetching, the API key with its own button) do not.
+const PERSISTED = ['brightness', 'mode', 'scrollSpeed', 'pauseSec', 'dwellSec',
+                   'refreshSec', 'rotate180', 'wifiSleepCfg'];
+
+function onEdit(e) {
+  const t = e.target;
+  if (PERSISTED.includes(t.id) || t.closest('#feeds')) dirty();
+}
+document.addEventListener('input',  onEdit, true);
+document.addEventListener('change', onEdit, true);
 
 // ---------------------------------------------------------------- tabs
 

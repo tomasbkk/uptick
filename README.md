@@ -74,6 +74,7 @@ Settings are a single JSON document at `/config.json` on LittleFS, with a `schem
   "dwellSec": 15,
   "scrollSpeed": 20,
   "pauseSec": 0,
+  "palette": { "DIVIDER": "#202020" },
   "refreshSec": 60,
   "feeds": [
     { "source": "binance", "symbol": "BTCUSDT", "label": "BTC", "interval": "1h", "decimals": 0 }
@@ -122,6 +123,12 @@ Both run entirely in the browser - the page already holds the config, so no endp
 
 `interval` is the chart candle width, not the poll rate. 64 candles fill the panel's 64 columns, so it sets how far back the chart reaches. Yahoo has no 4h bar, so `4h` rounds to daily there - the same compromise Coinbase forces by rounding it up to 6h.
 
+### Saving
+
+Every setting the web page changes is one config document, so there is one Save: a bar that appears at the foot of the page whenever anything is unsaved, on any tab, and saves all of it. Brightness, mode, scroll speed, pause, power save and colours apply to the panel as soon as they change, so the effect can be judged before saving; everything else waits for Save. Pausing fetching and the CoinGecko key have their own buttons and are not part of the config.
+
+Power save used to be applied only when WiFi joined, so saving a change to it did nothing until a restart. A config POST now applies it straight away.
+
 ### REST API
 
 | Method | Path | Purpose |
@@ -132,8 +139,8 @@ Both run entirely in the browser - the page already holds the config, so no endp
 | POST | `/api/speed` | live scroll speed for both tickers, not persisted |
 | POST | `/api/pause` | live vertical-ticker pause, not persisted |
 | POST | `/api/mode` | live display mode, not persisted; the web page's mode picker uses it, so a mode applies as soon as it is chosen |
-| GET / POST | `/api/palette` | live colour overrides by name, not persisted |
-| POST | `/api/defaults` | restore factory settings, leaving WiFi alone |
+| GET / POST | `/api/palette` | live colour overrides by name, not persisted - the config's `palette` is what persists |
+| POST | `/api/defaults` | restore factory settings and colours, leaving WiFi alone |
 | POST | `/api/apikey` | store the CoinGecko key (write-only) |
 | POST | `/api/fetch` | pause or resume market polling |
 | GET | `/api/check?symbol=` | one Yahoo ticker's price, name and currency, for the check button (Yahoo sends no CORS header) |
@@ -301,7 +308,11 @@ For a Yahoo feed it is the move against the previous close, not a rolling 24 hou
 
 Twelve named colours, all overridable live through `/api/palette` and the web UI's colour pickers: `LABEL`, `PRICE`, `PCT_UP`, `PCT_DOWN`, `FILL_UP`, `TRACE_UP`, `FILL_DOWN`, `TRACE_DOWN`, `DIM`, `ACCENT`, `STALE`, `DIVIDER`. `DIVIDER` is the line between the horizontal ticker's sections; set to black it disappears.
 
-Overrides are RAM-only. The web page remembers picks in local storage and can export them as a `PAL_FACTORY` table to paste back into `display.cpp`.
+A picker applies its colour at once through `/api/palette`, which is RAM only, and raises the page's save bar; Save stores the palette in the config with everything else. Only the colours that differ from factory are stored, by name, so a colour nobody changed follows the factory set if that is ever retuned - and a config with no `palette` at all means factory, so what is on flash always says exactly what the panel shows. Unknown names and malformed colours are skipped rather than refused. Reset to factory, and Restore default settings, both bring the factory set back.
+
+The palette starts at factory before anything else runs, not in `displayBegin()`: the stored config is loaded, and its colours applied, before the panel is brought up.
+
+The factory set itself was tuned on the panel with the pickers and exported from the page with "export as C++" - a `PAL_FACTORY` table to paste into `display.cpp`. The page used to keep picks in the browser's local storage and push them back over the device on every load; that is gone now the device keeps them, and the page clears the old entry.
 
 ### Brightness
 

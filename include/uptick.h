@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.18.0"
+#define UPTICK_VERSION   "0.20.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 
@@ -172,11 +172,13 @@ struct DisplayStats
 };
 DisplayStats displayGetStats();
 
-// Live palette override, for tuning colours against the real panel instead of
-// guessing at RGB triples. Applied in RAM only - the web page remembers the
-// picks and exports them as source once a set is settled on.
+// The panel's colours, by name. Set applies at once and is RAM only - the
+// pickers use it for live preview. What persists is the config: configToJson
+// stores every colour that differs from factory, and configFromJson applies
+// them, so Save is what keeps a palette.
 uint8_t     displayPaletteCount();
 const char* displayPaletteName(uint8_t i);
 void        displayPaletteGet(uint8_t i, uint8_t& r, uint8_t& g, uint8_t& b);
+void        displayPaletteFactory(uint8_t i, uint8_t& r, uint8_t& g, uint8_t& b);
 bool        displayPaletteSet(const char* name, uint8_t r, uint8_t g, uint8_t b);
 void        displayPaletteReset();

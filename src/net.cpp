@@ -91,6 +91,11 @@ static void handlePostConfig()
   String err;
   if (!configFromJson(http.arg("plain"), err)) { sendErr(400, err); return; }
 
+  // Power save was only ever applied on joining, so saving a change to it did
+  // nothing until the next restart. Everything else in the config is picked up
+  // live by the tasks that read it; this is the one setting nothing polls.
+  WiFi.setSleep(g_cfg.wifiSleep);
+
   Serial.println("[net] config updated");
   sendOk();
 }
@@ -222,6 +227,7 @@ static void handleDefaults()
     configDefaults(g_cfg);
     g_cfgRev++;
   }
+  displayPaletteReset();           // defaults mean factory colours as well
 
   if (!configSave()) { sendErr(500, "could not write defaults"); return; }
 
