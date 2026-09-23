@@ -2,6 +2,7 @@
 #include "pins.h"
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <Fonts/TomThumb.h>
+#include <Fonts/FreeSansBold9pt7b.h>
 #include <driver/gpio.h>
 
 // The panel is driven by a circular DMA chain: every bit-plane of every row,
@@ -21,6 +22,13 @@ static uint16_t          s_refreshHz  = 0;
 static uint8_t           s_taskCore   = 0xFF;
 static volatile uint32_t s_stackFree  = 0;
 static volatile uint32_t s_tickerUs   = 0;
+
+// When the splash went up. The display task holds it until SPLASH_MS has
+// passed, counted from here rather than from the task start - the WiFi join
+// runs in between, and when that is slow the splash has already been up long
+// enough.
+static uint32_t          s_splashAt   = 0;
+static const uint32_t    SPLASH_MS    = 2500;
 
 // Brightness last written to the OE bits. setBrightness8 walks the whole of
 // both DMA buffers, so it runs when the value changes, not every frame.
@@ -421,6 +429,34 @@ static void drawSetup()
   drawTiny(0,  9, g_net.ssid.c_str(), C_LABEL());
   drawTiny(0, 17, "THEN OPEN", C_DIM());
   drawTiny(0, 25, g_net.ip.c_str(), C_LABEL());
+}
+
+// The boot splash: the wordmark from the web page, "up" in white and "tick" in
+// its green, with the firmware version tucked into the bottom-right corner.
+// The colours are the brand's, not the palette's, so tuning the palette never
+// changes the logo.
+//
+// FreeSansBold 9pt sets "uptick" 52 pixels wide and 17 tall, 12 above the
+// baseline and 5 below it for the p. Its ink starts one pixel right of the
+// cursor, hence the -1 when centring. The logo is centred in the 27 rows above
+// the version line.
+static void drawSplash()
+{
+  const int16_t LOGO_W = 52, LOGO_H = 17, LOGO_ASCENT = 12;
+  const int16_t verTop = PANEL_H - TINY_H;
+  const int16_t logoTop = (verTop - LOGO_H) / 2;
+
+  matrix->fillScreen(0);
+  matrix->setFont(&FreeSansBold9pt7b);
+  matrix->setCursor((PANEL_W - LOGO_W) / 2 - 1, logoTop + LOGO_ASCENT);
+  matrix->setTextColor(col(255, 255, 255));
+  matrix->print("up");
+  matrix->setTextColor(col(63, 185, 80));   // --up on the web page
+  matrix->print("tick");
+  matrix->setFont(NULL);
+
+  const char* ver = "v" UPTICK_VERSION;
+  drawTiny(PANEL_W - tinyWidth(ver), verTop, ver, col(110, 120, 130));
 }
 
 // Shown briefly after a successful join. The panel is the one part of this
@@ -856,11 +892,14 @@ bool displayBegin()
   s_frameUs   = s_refreshHz ? 1000000UL / s_refreshHz : 10000;
 
   uint8_t bri;
+  bool    rot;
   {
     CfgLock lk;
     bri = g_cfg.brightness;
+    rot = g_cfg.rotate180;
   }
   applyBrightness(bri);
+  matrix->setRotation(rot ? 2 : 0);   // or the splash comes up upside down
 
   // Adafruit_GFX wraps by default, and it decides using the glyph ADVANCE, not
   // its ink: a right-aligned string whose last character ends flush at column
@@ -870,9 +909,9 @@ bool displayBegin()
   // can only ever do damage.
   matrix->setTextWrap(false);
 
-  matrix->fillScreen(0);
-  drawTiny(0, 12, "UPTICK " UPTICK_VERSION, C_ACCENT());
+  drawSplash();
   flip();
+  s_splashAt = millis();
 
   Serial.printf("[panel] %ux%u, %u-bit, %u Hz, %lu MHz clock, %lu bytes DMA\n",
                 PANEL_W, PANEL_H, PANEL_BIT_DEPTH, s_refreshHz,
@@ -890,6 +929,10 @@ void displayTask(void* arg)
   uint8_t  feedIdx   = 0;
   uint32_t lastSwap  = millis();
   s_taskCore = xPortGetCoreID();
+
+  // Leave the splash up for its full time before the first real frame.
+  while (s_ok && millis() - s_splashAt < SPLASH_MS)
+    vTaskDelay(pdMS_TO_TICKS(50));
 
   uint32_t taskStart = millis();
 

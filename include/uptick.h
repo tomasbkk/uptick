@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.20.0"
+#define UPTICK_VERSION   "0.21.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 
