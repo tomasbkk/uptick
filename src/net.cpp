@@ -622,6 +622,11 @@ static bool joinSTA(const String& ssid, const String& pass)
   }
   Serial.printf("[net] joined, ip %s rssi %d\n", g_net.ip.c_str(), WiFi.RSSI());
 
+  // UTC only - nothing here shows a local time. The clock is for comparing
+  // against the trading sessions Yahoo reports, which are Unix times too.
+  // SNTP runs in the background and keeps it synced from here on.
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+
   if (MDNS.begin(UPTICK_NAME)) {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("[net] mdns: http://%s.local/\n", UPTICK_NAME);

@@ -1,8 +1,9 @@
 #pragma once
 #include <Arduino.h>
+#include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.21.0"
+#define UPTICK_VERSION   "0.22.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 
@@ -82,7 +83,22 @@ struct Quote
   float    points[UPTICK_MAX_POINTS];
   float    lo         = 0;
   float    hi         = 0;
+
+  // Yahoo chart fetches only; all zero otherwise, and for crypto, which never
+  // closes. The exchange's pre, regular and post sessions for the current
+  // trading day as Unix start/end pairs, when the price shown last traded, and
+  // which session it came from. The display works out from these whether the
+  // market is open, and so which icon, if any, goes beside the price.
+  uint32_t sess[3][2] = {};
+  uint32_t tradeTs    = 0;
+  uint8_t  session    = 0;      // SESSION_*
 };
+
+enum : uint8_t { SESSION_REGULAR, SESSION_PRE, SESSION_POST };
+
+// True once SNTP has set the clock. Before that time() counts from 1970, and
+// nothing that compares against an exchange's hours can be trusted.
+inline bool clockValid() { return time(nullptr) > 1700000000; }
 
 extern Quote g_quotes[UPTICK_MAX_FEEDS];
 extern SemaphoreHandle_t g_quoteMutex;

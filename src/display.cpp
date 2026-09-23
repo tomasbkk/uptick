@@ -66,7 +66,8 @@ struct FrameKey
   uint8_t  showInfo;
   uint8_t  stale;
   uint8_t  valid;
-  uint8_t  pad[3];
+  uint8_t  market;
+  uint8_t  pad[2];
 };
 
 // Holding this keeps the render task from drawing. It used to protect the
@@ -153,13 +154,15 @@ enum PalIdx {
   P_LABEL, P_PRICE, P_PCT_UP, P_PCT_DOWN,
   P_FILL_UP, P_TRACE_UP, P_FILL_DOWN, P_TRACE_DOWN,
   P_DIM, P_ACCENT, P_STALE, P_DIVIDER,
+  P_SUN, P_MOON, P_CLOSED,
   P_COUNT
 };
 
 static const char* const PAL_NAMES[P_COUNT] = {
   "LABEL", "PRICE", "PCT_UP", "PCT_DOWN",
   "FILL_UP", "TRACE_UP", "FILL_DOWN", "TRACE_DOWN",
-  "DIM", "ACCENT", "STALE", "DIVIDER"
+  "DIM", "ACCENT", "STALE", "DIVIDER",
+  "SUN", "MOON", "CLOSED"
 };
 
 // Tuned on the panel with the palette pickers and exported from the web page.
@@ -176,6 +179,9 @@ static const Rgb PAL_FACTORY[P_COUNT] = {
   {  60, 140, 255 },   // ACCENT     - setup screens
   { 230, 160,  40 },   // STALE      - old data
   {   3,   1, 116 },   // DIVIDER    - ticker section line, black hides it
+  { 255, 170,   0 },   // SUN        - pre-market icon
+  { 150, 170, 255 },   // MOON       - after-hours icon
+  { 140, 140, 150 },   // CLOSED     - market-closed icon
 };
 
 // Starts at factory before anything else runs. The stored config is loaded -
@@ -232,6 +238,9 @@ static uint16_t C_DIM()        { return P(P_DIM);        }
 static uint16_t C_ACCENT()     { return P(P_ACCENT);     }
 static uint16_t C_STALE()      { return P(P_STALE);      }
 static uint16_t C_DIVIDER()    { return P(P_DIVIDER);    }
+static uint16_t C_SUN()        { return P(P_SUN);        }
+static uint16_t C_MOON()       { return P(P_MOON);       }
+static uint16_t C_CLOSED()     { return P(P_CLOSED);     }
 
 // ---------------------------------------------------------------- text
 
@@ -354,17 +363,89 @@ static void formatPriceShort(char* out, size_t n, float p, const char* cur)
 // abbreviate. "$214,460.00" is 66 px in the 5x7 font - one pixel too wide for
 // the panel - so this is the difference between a price and a truncated price.
 static void drawPriceLine(int16_t yTop, float price, uint8_t decimals, uint16_t c,
-                          const char* cur)
+                          const char* cur, int16_t maxW = PANEL_W)
 {
   char buf[24];
   formatPrice(buf, sizeof(buf), price, decimals, cur);
 
-  if (bigWidth(buf) <= PANEL_W)  { drawBig(0, yTop, buf, c); return; }
-  if (tinyWidth(buf) <= PANEL_W) { drawTiny(0, yTop + 1, buf, c); return; }
+  if (bigWidth(buf) <= maxW)  { drawBig(0, yTop, buf, c); return; }
+  if (tinyWidth(buf) <= maxW) { drawTiny(0, yTop + 1, buf, c); return; }
 
   formatPriceShort(buf, sizeof(buf), price, cur);
-  if (bigWidth(buf) <= PANEL_W) drawBig(0, yTop, buf, c);
-  else                          drawTiny(0, yTop + 1, buf, c);
+  if (bigWidth(buf) <= maxW) drawBig(0, yTop, buf, c);
+  else                       drawTiny(0, yTop + 1, buf, c);
+}
+
+// ---------------------------------------------------------------- market state
+
+// Whether a stock's market is open, for the icon beside its price on the chart
+// screen. Nothing for crypto, which never closes, or while the clock has not
+// synced yet.
+enum : uint8_t { MKT_OPEN, MKT_PRE, MKT_POST, MKT_CLOSED };
+
+// Decided at draw time rather than at fetch time, so the icon changes when the
+// session does, not when the feed next comes round.
+//
+// Within a session the price must also come from it: a quote whose last trade
+// is from before this session began means nothing has traded yet, which is
+// what a holiday looks like - Yahoo can still report a regular session for it.
+// It also covers the first minutes of pre-market, and a chart whose extended
+// fetch failed, which shows the regular close.
+static uint8_t marketState(const Quote& q)
+{
+  if (!q.sess[1][1] || !clockValid()) return MKT_OPEN;
+
+  const uint32_t now = (uint32_t)time(nullptr);
+  auto in = [&](uint8_t i, uint32_t t) { return t >= q.sess[i][0] && t < q.sess[i][1]; };
+
+  if (in(1, now)) return q.tradeTs >= q.sess[1][0] ? MKT_OPEN : MKT_CLOSED;
+  if (in(0, now)) return (q.session == SESSION_PRE  && in(0, q.tradeTs)) ? MKT_PRE  : MKT_CLOSED;
+  if (in(2, now)) return (q.session == SESSION_POST && in(2, q.tradeTs)) ? MKT_POST : MKT_CLOSED;
+  return MKT_CLOSED;
+}
+
+// 7x7, the height of the big font's digits, so an icon sits level with the
+// price beside it. One byte per row, leftmost pixel in the top bit.
+static const int16_t ICON_W = 7;
+
+static const uint8_t ICON_SUN[7] = {     // rising over the horizon: pre-market
+  0x92,   // #..#..#
+  0x00,   // .......
+  0x38,   // ..###..
+  0x7C,   // .#####.
+  0x7C,   // .#####.
+  0x00,   // .......
+  0xFE,   // #######
+};
+
+static const uint8_t ICON_MOON[7] = {    // crescent: after hours
+  0x38,   // ..###..
+  0x70,   // .###...
+  0xE0,   // ###....
+  0xE0,   // ###....
+  0xE0,   // ###....
+  0x70,   // .###...
+  0x38,   // ..###..
+};
+
+static const uint8_t ICON_CLOSED[7] = {  // padlock: market closed
+  0x38,   // ..###..
+  0x44,   // .#...#.
+  0x44,   // .#...#.
+  0xFE,   // #######
+  0xEE,   // ###.###
+  0xEE,   // ###.###
+  0xFE,   // #######
+};
+
+static void drawMarketIcon(int16_t x, int16_t yTop, uint8_t state)
+{
+  switch (state)
+  {
+    case MKT_PRE:    matrix->drawBitmap(x, yTop, ICON_SUN,    ICON_W, 7, C_SUN());    break;
+    case MKT_POST:   matrix->drawBitmap(x, yTop, ICON_MOON,   ICON_W, 7, C_MOON());   break;
+    case MKT_CLOSED: matrix->drawBitmap(x, yTop, ICON_CLOSED, ICON_W, 7, C_CLOSED()); break;
+  }
 }
 
 // ---------------------------------------------------------------- chart
@@ -513,7 +594,7 @@ static bool isStale(const Config& cfg, const Quote& q)
 // its currency, and a list where BTC has a "$" and TSLA does not reads as a
 // mistake.
 static void drawQuoteHeader(const Feed& f, const Quote& q, bool stale, int16_t yTop,
-                            bool withCurrency)
+                            bool withCurrency, uint8_t market = MKT_OPEN)
 {
   const char*    label  = f.label.c_str();
   const uint16_t cLabel = stale ? C_STALE() : C_LABEL();
@@ -553,15 +634,27 @@ static void drawQuoteHeader(const Feed& f, const Quote& q, bool stale, int16_t y
   }
 
   // One row left blank so the two lines do not touch.
-  drawPriceLine(yTop + 8, q.price, f.decimals, C_PRICE(), withCurrency ? ccyPrefix(q) : "");
+  // The market icon goes at the right edge, under the change figure, and the
+  // price gives up that width to it - it drops to the small font sooner rather
+  // than running underneath.
+  if (market == MKT_OPEN)
+  {
+    drawPriceLine(yTop + 8, q.price, f.decimals, C_PRICE(), withCurrency ? ccyPrefix(q) : "");
+  }
+  else
+  {
+    drawPriceLine(yTop + 8, q.price, f.decimals, C_PRICE(), withCurrency ? ccyPrefix(q) : "",
+                  PANEL_W - ICON_W - 2);
+    drawMarketIcon(PANEL_W - ICON_W, yTop + 8, market);
+  }
 }
 
 static void drawSingleChart(const Config& cfg, const Feed& f, const Quote& q, bool stale)
 {
   matrix->fillScreen(0);
 
-  // Rows 0-14: label, change and price.
-  drawQuoteHeader(f, q, stale, 0, true);
+  // Rows 0-14: label, change and price, with the market icon for stocks.
+  drawQuoteHeader(f, q, stale, 0, true, marketState(q));
 
   // Rows 16-31: chart, coloured by its own window rather than the 24h figure.
   const bool chartUp = q.changePct >= 0.0f;
@@ -598,13 +691,13 @@ static void drawPaletteTest()
 {
   matrix->fillScreen(0);
 
-  // Same order as PAL_NAMES, four across and three down, so the web page's
+  // Same order as PAL_NAMES, four across and four down, so the web page's
   // picker grid and the panel read left to right the same way.
   for (uint8_t i = 0; i < P_COUNT; i++)
   {
     const int16_t x = (i % 4) * 16;
-    const int16_t y = (i / 4) * 11;
-    matrix->fillRect(x, y, 16, 10, P(i));
+    const int16_t y = (i / 4) * 8;
+    matrix->fillRect(x, y, 16, 7, P(i));
   }
 }
 
@@ -1024,6 +1117,7 @@ void displayTask(void* arg)
     key.feedIdx   = feedIdx;
     key.apMode    = g_net.apMode;
     key.valid     = q.valid;
+    key.market    = marketState(q);
 
     const bool stale    = isStale(cfg, q);
     const bool showInfo = !g_net.apMode && (millis() - taskStart < INFO_MS);

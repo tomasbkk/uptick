@@ -306,11 +306,30 @@ The chart span is per-feed and adjustable; the percentage is always the fixed 24
 
 At `1h` candles the 24h figure comes free from the candles already fetched, 24 bars back. Only `5m` and `15m` feeds trigger a second request, since 64 of those candles do not span a day.
 
-For a Yahoo feed it is the move against the previous close, not a rolling 24 hours. A rolling window is meaningless for something that trades 6.5 hours a day, and the previous close is the number every quote page prints. Yahoo supplies it in the same response, so no second request is ever needed. Outside market hours the price holds at the last close and the figure stops moving - that is correct, not a stalled fetch, and the stale indicator stays off because it tracks fetch failures rather than data age.
+For a Yahoo feed it is the move against the previous close, not a rolling 24 hours. A rolling window is meaningless for something that trades 6.5 hours a day, and the previous close is the number every quote page prints. Yahoo supplies it in the same response, so no second request is needed during the regular session. Pre-market and after hours, the chart screen shows the extended-hours price and its change instead - see market hours below. Once trading stops the price holds and the figure stops moving - that is correct, not a stalled fetch, and the stale indicator stays off because it tracks fetch failures rather than data age.
+
+### Market hours
+
+On the chart screen a stock's price carries an icon at the right edge, under the change figure, saying whether it is live:
+
+| Icon | When | Price and change shown |
+| --- | --- | --- |
+| none | regular session | the live price, against the previous close |
+| rising sun | pre-market, 4:00-9:30 in New York | the pre-market price, against the previous close |
+| crescent moon | after hours, 16:00-20:00 in New York | the after-hours price, against today's close |
+| padlock | closed - overnight, weekends, holidays | the last regular close and its day change |
+
+The hours are not hardcoded. Every Yahoo chart response carries `currentTradingPeriod`, the exchange's pre, regular and post sessions for the trading day as Unix times, so this works for any exchange, including ones with no extended hours. The device keeps UTC from SNTP (`pool.ntp.org`), started once WiFi joins, and compares against those. Until the clock syncs, no icon is shown.
+
+The extended-hours price is a second request, made only while an extended session is on: today at 5-minute bars with `includePrePost=true`, of which only the newest real close is kept. The chart request cannot supply it - Yahoo's keyless meta has no pre- or post-market price, and asking the chart request for extended hours would put those bars in the chart too, over twice as many per day, so 64 columns would cover under half the history.
+
+A session only counts as live if the price actually traded in it. A quote whose last trade is from before the session opened means nothing has traded yet - which is what a holiday looks like, since Yahoo can still report a regular session for one - so it shows the padlock. So do the first minutes of pre-market, before anything trades.
+
+The state is worked out at draw time, so the icon changes when the session does, not when the feed next comes round. Crypto never shows one. The tickers do not either: Yahoo's batch endpoint breaks when asked for extended hours, answering 400 or returning timestamps with no prices, so they stay on regular-session prices.
 
 ### Palette
 
-Twelve named colours, all overridable live through `/api/palette` and the web UI's colour pickers: `LABEL`, `PRICE`, `PCT_UP`, `PCT_DOWN`, `FILL_UP`, `TRACE_UP`, `FILL_DOWN`, `TRACE_DOWN`, `DIM`, `ACCENT`, `STALE`, `DIVIDER`. `DIVIDER` is the line between the horizontal ticker's sections; set to black it disappears.
+Fifteen named colours, all overridable live through `/api/palette` and the web UI's colour pickers: `LABEL`, `PRICE`, `PCT_UP`, `PCT_DOWN`, `FILL_UP`, `TRACE_UP`, `FILL_DOWN`, `TRACE_DOWN`, `DIM`, `ACCENT`, `STALE`, `DIVIDER`, `SUN`, `MOON`, `CLOSED`. `DIVIDER` is the line between the horizontal ticker's sections; set to black it disappears. The last three are the market-hours icons.
 
 A picker applies its colour at once through `/api/palette`, which is RAM only, and raises the page's save bar; Save stores the palette in the config with everything else. Only the colours that differ from factory are stored, by name, so a colour nobody changed follows the factory set if that is ever retuned - and a config with no `palette` at all means factory, so what is on flash always says exactly what the panel shows. Unknown names and malformed colours are skipped rather than refused. Reset to factory, and Restore default settings, both bring the factory set back.
 

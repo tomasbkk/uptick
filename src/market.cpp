@@ -145,30 +145,79 @@ static int extractField(Stream& s, int wantIdx, float* out, int maxOut)
   return n;
 }
 
+// What a Yahoo chart response says besides the closes.
+struct YahooMeta
+{
+  float    pct         = 0;      // regularMarketChangePercent
+  bool     hasPct      = false;
+  char     ccy[8]      = "USD";
+  uint32_t marketTime  = 0;      // regularMarketTime - the last regular-session trade
+  float    marketPrice = 0;      // regularMarketPrice - the close pre and post compare to
+  uint32_t sess[3][2]  = {};     // currentTradingPeriod pre, regular, post: start, end
+  uint32_t lastTs      = 0;      // when the newest close traded; needs a timestamp buffer
+};
+
+// A literal key matched one character at a time against the stream.
+struct KeyMatch
+{
+  const char* key;
+  uint8_t     len;
+  uint8_t     m;
+
+  explicit KeyMatch(const char* k) : key(k), len((uint8_t)strlen(k)), m(0) {}
+
+  bool step(char c)
+  {
+    m = (c == key[m]) ? m + 1 : (c == key[0] ? 1 : 0);
+    if (m < len) return false;
+    m = 0;
+    return true;
+  }
+};
+
 // Yahoo nests the series three arrays deep and returns the quote fields in no
 // fixed order - volume, high, close, open and low have all been observed in
 // different positions - so the index-based extractor above cannot be used on
-// it. This walks the stream once matching two literal keys: the change against
-// the previous close, which arrives early inside "meta", and the close series
-// inside indicators.quote[0]. One request therefore yields the price, the
-// day's move and the chart, with no second lookup.
-static int extractYahoo(Stream& s, float* out, int maxOut, float& pct, bool& hasPct,
-                        char* ccy, size_t ccyLen)
+// it. This walks the stream once matching literal keys instead: from "meta",
+// the change against the previous close, the currency, the last regular trade
+// and the trading sessions; then the close series inside indicators.quote[0].
+// One request therefore yields the price, the day's move and the chart.
+//
+// The sessions are the day's pre, regular and post periods, which come as
+// "pre":{...,"start":N,"end":N}. Intraday responses also carry
+// "tradingPeriods", where the same names open arrays rather than objects, so
+// matching on the brace keeps the two apart.
+//
+// With a timestamp buffer it also records when the newest close traded. Bars
+// with no trade come back null, so the close array is counted element by
+// element to find which timestamp the last real price belongs to.
+static int extractYahoo(Stream& s, float* out, int maxOut, YahooMeta& meta,
+                        uint32_t* ts = nullptr, int tsCap = 0)
 {
-  static const char KEY_PCT[]   = "\"regularMarketChangePercent\":";
-  static const char KEY_CLOSE[] = "\"close\":[";
-  static const char KEY_CCY[]   = "\"currency\":\"";
-  const uint8_t LEN_PCT   = sizeof(KEY_PCT) - 1;
-  const uint8_t LEN_CLOSE = sizeof(KEY_CLOSE) - 1;
-  const uint8_t LEN_CCY   = sizeof(KEY_CCY) - 1;
+  KeyMatch kPct("\"regularMarketChangePercent\":");
+  KeyMatch kTime("\"regularMarketTime\":");
+  KeyMatch kPrice("\"regularMarketPrice\":");
+  KeyMatch kCcy("\"currency\":\"");
+  KeyMatch kPre("\"pre\":{");
+  KeyMatch kReg("\"regular\":{");
+  KeyMatch kPost("\"post\":{");
+  KeyMatch kStart("\"start\":");
+  KeyMatch kEnd("\"end\":");
+  KeyMatch kTs("\"timestamp\":[");
+  KeyMatch kClose("\"close\":[");
 
-  uint8_t mp = 0, mc = 0, mu = 0;  // how much of each key has matched so far
-  bool    inPct = false, inArr = false, inCcy = false;
+  // What the digits being collected are for.
+  enum : uint8_t { T_NONE, T_PCT, T_TIME, T_PRICE, T_START, T_END, T_TS, T_CLOSE };
+  uint8_t target = T_NONE;
+  bool    inCcy  = false;
+  int8_t  sec    = -1;          // which session object we are inside, if any
+
   char    buf[24];
   uint8_t blen = 0;
-  int     n    = 0;
-
-  hasPct = false;
+  int     n    = 0;             // closes kept
+  int     nTs  = 0;             // timestamps seen
+  int     idx  = 0;             // position in the close array, nulls included
+  int     last = -1;            // position of the newest non-null close
 
   const uint32_t deadline = millis() + 15000;
   uint32_t       lastData = millis();
@@ -195,6 +244,34 @@ static int extractYahoo(Stream& s, float* out, int maxOut, float& pct, bool& has
     n++;
   };
 
+  // Commits the number collected so far. Guarded on blen throughout because
+  // any of these fields can come back null, and an empty buffer would
+  // otherwise be read as a confident zero.
+  auto commit = [&]()
+  {
+    buf[blen] = 0;
+    if (blen)
+    {
+      switch (target)
+      {
+        case T_PCT:   meta.pct = atof(buf); meta.hasPct = true; break;
+        case T_TIME:  meta.marketTime  = strtoul(buf, nullptr, 10); break;
+        case T_PRICE: meta.marketPrice = atof(buf); break;
+        case T_START: if (sec >= 0) meta.sess[sec][0] = strtoul(buf, nullptr, 10); break;
+        case T_END:   if (sec >= 0) meta.sess[sec][1] = strtoul(buf, nullptr, 10); break;
+        case T_TS:    if (ts && nTs < tsCap) ts[nTs] = strtoul(buf, nullptr, 10); nTs++; break;
+        case T_CLOSE: push(atof(buf)); last = idx; break;
+      }
+    }
+    blen = 0;
+  };
+
+  auto finish = [&]()
+  {
+    if (ts && last >= 0 && last < nTs && last < tsCap) meta.lastTs = ts[last];
+    return n;
+  };
+
   while (millis() < deadline)
   {
     if (!s.available())
@@ -207,53 +284,56 @@ static int extractYahoo(Stream& s, float* out, int maxOut, float& pct, bool& has
     lastData = millis();
     char c   = (char)s.read();
 
-    if (inPct)
-    {
-      if (isNum(c) && blen < sizeof(buf) - 1) { buf[blen++] = c; continue; }
-
-      // Guarded on blen because the field can come back null, and an empty
-      // buffer would otherwise be reported as a confident 0.00%.
-      buf[blen] = 0;
-      if (blen) { pct = atof(buf); hasPct = true; }
-      inPct = false;
-      blen  = 0;
-      // Falls through: this character still has to reach the matchers.
-    }
-
     if (inCcy)
     {
       // Not every listing is priced in dollars - a Frankfurt line quotes EUR,
       // a London one quotes pence - and the panel must not print "$" over it.
-      if (c != '"' && blen < ccyLen - 1 && blen < sizeof(buf) - 1) { buf[blen++] = c; continue; }
+      if (c != '"' && blen < sizeof(meta.ccy) - 1) { buf[blen++] = c; continue; }
       buf[blen] = 0;
-      if (blen) { strncpy(ccy, buf, ccyLen - 1); ccy[ccyLen - 1] = 0; }
+      if (blen) strcpy(meta.ccy, buf);
       inCcy = false;
       blen  = 0;
       continue;
     }
 
-    if (inArr)
+    if (target != T_NONE)
     {
       if (isNum(c) && blen < sizeof(buf) - 1) { buf[blen++] = c; continue; }
 
-      // A bar with no trade comes back as null, which captures nothing. Those
-      // are dropped rather than interpolated - one column fewer is closer to
-      // the truth than a price that never existed.
-      if (blen) { buf[blen] = 0; push(atof(buf)); blen = 0; }
+      commit();
 
-      if (c == ']') return n;      // end of the close array; nothing after it is wanted
-      continue;
+      // The two arrays carry on past a comma; everything else is one value.
+      if (target == T_TS || target == T_CLOSE)
+      {
+        if (c == ',') { if (target == T_CLOSE) idx++; continue; }
+        if (c == ']')
+        {
+          // Nothing after the close array is wanted.
+          if (target == T_CLOSE) return finish();
+          target = T_NONE;
+          continue;
+        }
+        continue;                 // the letters of a null
+      }
+      target = T_NONE;
+      // Falls through: this character still has to reach the matchers.
     }
 
-    mp = (c == KEY_PCT[mp])   ? mp + 1 : (c == KEY_PCT[0]   ? 1 : 0);
-    mc = (c == KEY_CLOSE[mc]) ? mc + 1 : (c == KEY_CLOSE[0] ? 1 : 0);
-    mu = (c == KEY_CCY[mu])   ? mu + 1 : (c == KEY_CCY[0]   ? 1 : 0);
+    if (c == '}') sec = -1;
 
-    if (mp == LEN_PCT)   { mp = 0; inPct = true; blen = 0; }
-    if (mc == LEN_CLOSE) { mc = 0; inArr = true; blen = 0; }
-    if (mu == LEN_CCY)   { mu = 0; inCcy = true; blen = 0; }
+    if (kPct.step(c))   { target = T_PCT;   blen = 0; }
+    if (kTime.step(c))  { target = T_TIME;  blen = 0; }
+    if (kPrice.step(c)) { target = T_PRICE; blen = 0; }
+    if (kCcy.step(c))   { inCcy  = true;    blen = 0; }
+    if (kPre.step(c))   sec = 0;
+    if (kReg.step(c))   sec = 1;
+    if (kPost.step(c))  sec = 2;
+    if (kStart.step(c) && sec >= 0) { target = T_START; blen = 0; }
+    if (kEnd.step(c)   && sec >= 0) { target = T_END;   blen = 0; }
+    if (kTs.step(c))    { target = T_TS;    blen = 0; }
+    if (kClose.step(c)) { target = T_CLOSE; blen = 0; idx = 0; last = -1; }
   }
-  return n;
+  return finish();
 }
 
 // ---------------------------------------------------------------- adapters
@@ -521,6 +601,50 @@ bool marketProbeYahoo(const String& symbol, float& price, String& name, String& 
   return true;
 }
 
+// The newest extended-hours price, and when it traded.
+//
+// The chart request cannot supply it. Yahoo's meta carries no pre- or
+// post-market price keylessly, and asking the chart request to include
+// extended hours would put those bars in the chart too - over a month of
+// hourly bars that is more than twice as many per day, so the 64 columns
+// would span under half the history they do now. So this is a second, small
+// request, made only while an extended session is on: today at 5-minute bars,
+// extended hours included, of which only the last real close is kept.
+//
+// The timestamps are buffered to find which one that close belongs to, since
+// the newest bar can be null if nothing has traded in it yet. Static because
+// only the net task fetches, and 1.2 KB is a lot of its stack.
+static bool fetchYahooExtended(const Feed& f, float& price, uint32_t& ts)
+{
+  static uint32_t tsBuf[300];   // a whole day at 5 minutes is 192
+
+  WiFiClientSecure client;
+  HTTPClient       https;
+  prepareClient(client, https);
+
+  const String url = "https://query1.finance.yahoo.com/v8/finance/chart/" + urlEncode(f.symbol) +
+                     "?range=1d&interval=5m&includePrePost=true";
+  if (!https.begin(client, url)) return false;
+
+  const int code = https.GET();
+  if (code != HTTP_CODE_OK)
+  {
+    Serial.printf("[mkt] %s extended: http %d\n", f.symbol.c_str(), code);
+    https.end();
+    return false;
+  }
+
+  YahooMeta meta;
+  float     last;
+  const int n = extractYahoo(https.getStream(), &last, 1, meta, tsBuf, 300);
+  https.end();
+
+  if (n < 1 || meta.lastTs == 0) return false;
+  price = last;
+  ts    = meta.lastTs;
+  return true;
+}
+
 static bool fetchFeed(const Feed& f, Quote& q)
 {
   WiFiClientSecure client;
@@ -544,16 +668,13 @@ static bool fetchFeed(const Feed& f, Quote& q)
 
   const bool yahoo = (f.source == "yahoo");
 
-  float raw[UPTICK_MAX_POINTS];
-  float dayPct  = 0.0f;
-  bool  haveDay = false;
-  char  ccy[8]  = "USD";        // the crypto sources are all USD pairs
-  int   n;
+  float     raw[UPTICK_MAX_POINTS];
+  YahooMeta meta;               // ccy stays "USD": the crypto sources are all USD pairs
+  int       n;
 
   if (yahoo)
   {
-    n = extractYahoo(https.getStream(), raw, UPTICK_MAX_POINTS, dayPct, haveDay,
-                     ccy, sizeof(ccy));
+    n = extractYahoo(https.getStream(), raw, UPTICK_MAX_POINTS, meta);
   }
   else
   {
@@ -604,9 +725,39 @@ static bool fetchFeed(const Feed& f, Quote& q)
     // a day: the honest equivalent is the move against the previous close,
     // which is also the number every quote page prints. Yahoo supplies it in
     // the response already parsed above, so there is no second request.
-    change24h = dayPct;
-    has24h    = haveDay;
+    change24h = meta.pct;
+    has24h    = meta.hasPct;
     if (!has24h) Serial.printf("[mkt] %s: no change field\n", f.symbol.c_str());
+  }
+
+  // Outside the regular session a stock still trades, pre-market from 4am and
+  // after hours until 8pm in New York, and the chart layout shows that price
+  // with its change. The chart itself stays on regular-session bars. See
+  // fetchYahooExtended for why that takes a second request.
+  float    price   = raw[n - 1];
+  uint32_t tradeTs = yahoo ? meta.marketTime : 0;
+  uint8_t  session = SESSION_REGULAR;
+
+  if (yahoo && meta.marketPrice > 0.0f && clockValid())
+  {
+    const uint32_t now  = (uint32_t)time(nullptr);
+    const bool     pre  = now >= meta.sess[0][0] && now < meta.sess[0][1];
+    const bool     post = now >= meta.sess[2][0] && now < meta.sess[2][1];
+
+    float    extPrice;
+    uint32_t extTs;
+    if ((pre || post) && fetchYahooExtended(f, extPrice, extTs) &&
+        extTs >= meta.sess[pre ? 0 : 2][0])
+    {
+      // Against regularMarketPrice either way: before the open that is still
+      // the previous close, after the close it is today's. Both are what a
+      // quote page measures the extended move from.
+      price     = extPrice;
+      change24h = (extPrice - meta.marketPrice) / meta.marketPrice * 100.0f;
+      has24h    = true;
+      tradeTs   = extTs;
+      session   = pre ? SESSION_PRE : SESSION_POST;
+    }
   }
   else
   {
@@ -633,9 +784,13 @@ static bool fetchFeed(const Feed& f, Quote& q)
     memcpy(q.points, raw, sizeof(float) * n);
     q.lo    = lo;
     q.hi    = hi;
-    q.price = raw[n - 1];
-    strncpy(q.ccy, ccy, sizeof(q.ccy) - 1);
+    q.price = price;
+    strncpy(q.ccy, meta.ccy, sizeof(q.ccy) - 1);
     q.ccy[sizeof(q.ccy) - 1] = 0;
+
+    memcpy(q.sess, meta.sess, sizeof(q.sess));   // all zero unless Yahoo
+    q.tradeTs = tradeTs;
+    q.session = session;
 
     // Always computed, because it is free and because it is what the chart
     // actually shows. The 24h figure is optional and sits alongside it.
@@ -650,10 +805,11 @@ static bool fetchFeed(const Feed& f, Quote& q)
 
   // Both figures, because they legitimately differ: the panel prints the 24h
   // change while the chart is coloured by its own window.
-  Serial.printf("[mkt] %s %.4f  24h %+.2f%%%s  chart %+.2f%%  (%d pts)\n",
+  Serial.printf("[mkt] %s %.4f  24h %+.2f%%%s  chart %+.2f%%  (%d pts)%s\n",
                 f.symbol.c_str(), q.price,
                 has24h ? change24h : 0.0f, has24h ? "" : "?",
-                q.changePct, n);
+                q.changePct, n,
+                session == SESSION_PRE ? "  pre-market" : session == SESSION_POST ? "  after hours" : "");
   return true;
 }
 
@@ -726,6 +882,12 @@ static void applyQuote(const Config& cfg, const char* source, const String& sym,
     // chart fetch. Until it has had one, "unknown" prints no symbol at all,
     // which beats a "$" in front of a price quoted in euros.
     if (!strcmp(source, "yahoo") && q.count == 0) q.ccy[0] = 0;
+
+    // A regular-session price with no session data: the chart layout shows no
+    // market icon for it until its own fetch has worked one out.
+    memset(q.sess, 0, sizeof(q.sess));
+    q.tradeTs = 0;
+    q.session = SESSION_REGULAR;
   }
 }
 
