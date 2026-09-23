@@ -214,7 +214,9 @@ Yahoo needs a second scanner (`extractYahoo`). Its series sits three arrays deep
 
 The layout decides how data is fetched.
 
-**Single chart polls only the feed on screen**, one candle request at a time. A feed nobody is looking at does not need a fresh chart, so every fetch lands at a screen transition and the rest of each dwell is quiet. The cost is that effective refresh becomes the rotation period rather than the poll interval.
+**Single chart polls the feed on screen**, one candle request at a time, so an update lands while you are looking at it and a price moving is visible. The one exception is a feed that has no data yet - after boot, or just added - which is fetched during the previous feed's dwell, so its first turn opens on its chart rather than on "waiting for data". Once it has data it refreshes on its own turn again. The rest of the list is left alone, so effective refresh is the rotation period rather than the poll interval.
+
+Fetching only on screen once also kept every fetch at a screen transition, where a refresh glitch showed least. The DMA driver made that moot: a fetch cannot disturb the panel now.
 
 **Both tickers batch.** They show a price and a change per feed and no chart, which is what the batch endpoints return. One request per source replaces one per feed, every poll interval:
 

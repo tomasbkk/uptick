@@ -1063,18 +1063,30 @@ static void pollCharts(const Config& cfg, uint32_t now)
 {
   const uint8_t feeds = cfg.feedCount ? cfg.feedCount : 1;
 
-  // Poll only what is on screen.
+  // Poll the feed on screen, plus the one after it while that has no data.
   //
-  // A feed nobody is looking at does not need fresh data, and fetching it
-  // disturbs the panel showing something else. Gating on the visible feed puts
-  // every fetch at a screen transition - the moment a glitch is least
-  // noticeable, because the content is changing anyway - and leaves the rest
-  // of the dwell completely quiet.
+  // A feed nobody is looking at does not need fresh data, so the rest of the
+  // list is left alone - that keeps the request rate at the rotation, not the
+  // feed count times the poll interval. Refreshing the visible feed also means
+  // the update lands while it is on screen, so a price moving is something you
+  // actually see happen.
   //
-  // The cost is that effective refresh becomes the rotation period rather than
-  // the poll interval: a feed that comes due just after leaving the screen
-  // waits until its next turn.
+  // The exception is a feed with nothing to show at all. Visible-only meant
+  // each feed's first turn after boot, or after being added, opened on
+  // "waiting for data" while its fetch ran; fetching it during the previous
+  // feed's dwell brings it on screen with its chart already drawn. Once it has
+  // data it goes back to refreshing on its own turn.
+  //
+  // Effective refresh is still the rotation period rather than the poll
+  // interval: a feed that comes due just after leaving the screen waits until
+  // it is next up again.
   const int visible = displayVisibleFeed();
+  int upNext = (visible >= 0 && cfg.feedCount > 1) ? (visible + 1) % cfg.feedCount : -1;
+  if (upNext >= 0)
+  {
+    QuoteLock lk;
+    if (g_quotes[upNext].valid) upNext = -1;
+  }
 
   // With one feed eligible there is nothing to space out, and a minimum gap
   // would be actively harmful - it could block the visible feed's only window
@@ -1086,13 +1098,16 @@ static void pollCharts(const Config& cfg, uint32_t now)
     if (s_lastAnyFetchMs && (now - s_lastAnyFetchMs) < minGap) return;
   }
 
-  // Refresh whichever eligible feed is most overdue, one per call.
+  // Refresh whichever eligible feed is most overdue, one per call. The visible
+  // feed is checked first, so when both have never been fetched - the first
+  // turn after boot - it wins the tie and the next one follows a moment later.
   int      pick   = -1;
   uint32_t oldest = 0;
 
-  for (uint8_t i = 0; i < cfg.feedCount; i++)
+  for (uint8_t n = 0; n < cfg.feedCount; n++)
   {
-    if (visible >= 0 && i != (uint8_t)visible) continue;
+    const uint8_t i = (visible >= 0) ? (uint8_t)((visible + n) % cfg.feedCount) : n;
+    if (visible >= 0 && (int)i != visible && (int)i != upNext) continue;
 
     uint32_t age = now - s_lastAttemptMs[i];
 
