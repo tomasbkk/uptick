@@ -1,4 +1,5 @@
 #include "uptick.h"
+#include "pins.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
@@ -11,15 +12,23 @@ volatile uint32_t g_cfgRev   = 1;
 void configDefaults(Config& c)
 {
   c.schema     = UPTICK_SCHEMA;
-  c.brightness = 40;
+  c.brightness = PANEL_BRIGHTNESS_DEFAULT;
+  c.bitDepth   = PANEL_BIT_DEPTH_DEFAULT;
   c.rotate180  = false;
+  // Default off: measured on this panel, power save costs a few percent of
+  // refresh stability, and the ~40 mA it saves is irrelevant on mains power.
+  c.wifiSleep  = false;
   c.mode         = "single_chart";
-  c.changeWindow = "chart";
   c.dwellSec   = 15;
-  c.refreshSec = 30;
+  c.refreshSec = POLL_SEC_DEFAULT;
   c.tz         = "Europe/Bratislava";
-  c.feedCount  = 1;
+  // Factory feeds. decimals 0 means "pick from magnitude", which gives whole
+  // dollars above 1000 and cents below, so it suits all four.
+  c.feedCount  = 4;
   c.feeds[0]   = { "binance", "BTCUSDT", "BTC", "1h", 0 };
+  c.feeds[1]   = { "binance", "ETHUSDT", "ETH", "1h", 0 };
+  c.feeds[2]   = { "binance", "SOLUSDT", "SOL", "1h", 0 };
+  c.feeds[3]   = { "binance", "ZECUSDT", "ZEC", "1h", 0 };
 }
 
 static void feedToJson(const Feed& f, JsonObject o)
@@ -48,9 +57,10 @@ String configToJson()
     CfgLock lk;
     d["schema"]     = g_cfg.schema;
     d["brightness"] = g_cfg.brightness;
+    d["bitDepth"]   = g_cfg.bitDepth;
     d["rotate180"]  = g_cfg.rotate180;
+    d["wifiSleep"]  = g_cfg.wifiSleep;
     d["mode"]         = g_cfg.mode;
-    d["changeWindow"] = g_cfg.changeWindow;
     d["dwellSec"]   = g_cfg.dwellSec;
     d["refreshSec"] = g_cfg.refreshSec;
     d["tz"]         = g_cfg.tz;
@@ -76,21 +86,19 @@ bool configFromJson(const String& body, String& err)
   configDefaults(c);
 
   c.schema     = UPTICK_SCHEMA;
-  c.brightness = constrain((int)(d["brightness"] | 40), 1, 100);
+  c.brightness = constrain((int)(d["brightness"] | PANEL_BRIGHTNESS_DEFAULT), 1, 100);
+  c.bitDepth   = constrain((int)(d["bitDepth"] | PANEL_BIT_DEPTH_DEFAULT),
+                           PANEL_BIT_DEPTH_MIN, PANEL_BIT_DEPTH_MAX);
   c.rotate180  = d["rotate180"] | false;
+  c.wifiSleep  = d["wifiSleep"] | false;
   c.mode         = d["mode"]         | "single_chart";
-  c.changeWindow = d["changeWindow"] | "chart";
   c.dwellSec   = constrain((int)(d["dwellSec"]   | 15), 3, 3600);
-  c.refreshSec = constrain((int)(d["refreshSec"] | 30), 10, 3600);
+  c.refreshSec = constrain((int)(d["refreshSec"] | POLL_SEC_DEFAULT), 10, 3600);
   c.tz         = d["tz"] | "UTC";
 
-  if (c.mode != "single_chart" && c.mode != "multi_price") {
+  if (c.mode != "single_chart" && c.mode != "multi_price" &&
+      c.mode != "palette_test" && c.mode != "ramp_test") {
     err = "unknown mode";
-    return false;
-  }
-
-  if (c.changeWindow != "chart" && c.changeWindow != "24h") {
-    err = "changeWindow must be chart or 24h";
     return false;
   }
 
@@ -128,23 +136,43 @@ bool configSave()
   String json = configToJson();
 
   // Write to a temp file and rename, so a reset mid-write cannot leave a
-  // truncated config.json behind. The panel is stopped across the whole
-  // sequence - flash writes stall the bus and corrupt the matrix DMA.
+  // truncated config.json behind. The panel is held off across the whole
+  // sequence, because a flash write can starve the matrix DMA.
+  //
+  // Every exit from here must resume, including the failure paths: pause takes
+  // the panel mutex, so leaking it freezes the render task forever and the
+  // display stops updating until a reset.
   displayPause();
 
-  File f = LittleFS.open("/config.tmp", "w");
-  if (!f) { Serial.println("[cfg] open for write failed"); return false; }
-  size_t n = f.print(json);
-  f.close();
-  if (n != json.length()) { Serial.println("[cfg] short write"); return false; }
+  size_t n  = 0;
+  bool   ok = false;
 
-  LittleFS.remove(CFG_PATH);
-  if (!LittleFS.rename("/config.tmp", CFG_PATH)) {
-    Serial.println("[cfg] rename failed");
-    return false;
+  File f = LittleFS.open("/config.tmp", "w");
+  if (!f)
+  {
+    Serial.println("[cfg] open for write failed");
   }
-  Serial.printf("[cfg] saved %u bytes\n", (unsigned)n);
-  return true;
+  else
+  {
+    n = f.print(json);
+    f.close();
+
+    if (n != json.length())
+    {
+      Serial.println("[cfg] short write");
+    }
+    else
+    {
+      LittleFS.remove(CFG_PATH);
+      ok = LittleFS.rename("/config.tmp", CFG_PATH);
+      if (!ok) Serial.println("[cfg] rename failed");
+    }
+  }
+
+  displayResume();
+
+  if (ok) Serial.printf("[cfg] saved %u bytes\n", (unsigned)n);
+  return ok;
 }
 
 bool configBegin()

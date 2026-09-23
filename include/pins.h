@@ -22,13 +22,22 @@ static const uint16_t PANEL_H = 32;
 // A 64x64 panel would use 5 here (and need the board's address-E jumper).
 static const uint8_t HUB75_ADDR_COUNT = 4;
 
-// Colour depth per channel, and the single biggest lever on refresh rate:
-// frame time scales with (2^depth - 1), so every bit dropped roughly halves it.
+// Colour depth per channel is the single biggest lever on refresh rate: frame
+// time scales with (2^depth - 1), so every bit dropped roughly halves it.
 //
-// Measured on this panel: 6 bits gave 69 Hz, which flickers visibly. 4 bits
-// costs 15 time units per frame instead of 63, so it should land near 290 Hz.
-// 16 levels per channel is plenty for flat fills, a two-colour trace and text.
+// Measured on this panel: 6 bits -> 70 Hz, 5 bits -> ~110 Hz, 4 bits -> 221 Hz.
+// 5 is the default: 32 levels per channel is enough for real tonal range, and
+// ~110 Hz proved acceptable once flash reads stopped stalling the refresh.
 //
-// Check the result at /api/status -> refreshHz. Anything comfortably above
-// about 200 Hz reads as steady.
-static const uint8_t PANEL_BIT_DEPTH = 4;
+// This is only the fallback. The live value is config.bitDepth, because it is
+// a real trade between colour fidelity and flicker and belongs to whoever is
+// looking at the panel. Result shows up at /api/status -> refreshHz.
+static const uint8_t PANEL_BIT_DEPTH_DEFAULT = 5;
+static const uint8_t PANEL_BRIGHTNESS_DEFAULT = 5;
+
+// Poll interval default, in seconds. 60 measurably steadies the panel against
+// 30 - every fetch is a TLS handshake, and a desk ticker does not need a price
+// that is fresher than a minute.
+static const uint16_t POLL_SEC_DEFAULT = 60;
+static const uint8_t PANEL_BIT_DEPTH_MIN     = 3;
+static const uint8_t PANEL_BIT_DEPTH_MAX     = 6;

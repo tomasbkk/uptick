@@ -57,6 +57,26 @@
   .hide { display:none; }
   .hint { color:var(--dim); font-size:11px; margin:10px 0 0; }
   .dirty #saveAll { box-shadow:0 0 0 2px var(--accent); }
+  .sw { display:grid; grid-template-columns:repeat(4,1fr); gap:4px; margin-bottom:10px; }
+  .sw div { aspect-ratio:1/0.9; border-radius:4px; display:flex; align-items:flex-end;
+            justify-content:center; font-size:10px; padding-bottom:3px; color:#0d1117;
+            font-weight:700; }
+  .lv { display:flex; gap:6px; flex-wrap:wrap; }
+  .lv button { width:auto; flex:1 1 60px; }
+  .lv button.on { border-color:var(--accent); color:var(--accent); }
+  .pal { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-bottom:10px; }
+  .pal label { display:flex; align-items:center; gap:8px; margin:0; font-size:11px; }
+  .pal input[type=color] { width:44px; height:30px; padding:2px; flex:none; cursor:pointer; }
+  .pal span { flex:1; }
+  #palOut { width:100%; height:150px; font:11px ui-monospace,monospace; resize:vertical;
+            background:#0d1117; color:var(--fg); border:1px solid var(--line);
+            border-radius:6px; padding:8px; }
+  .symrow { display:flex; gap:6px; }
+  .symrow input { flex:1; }
+  .symrow button { width:auto; padding:7px 10px; }
+  .chk { font-size:11px; margin:4px 0 0; color:var(--dim); }
+  .chk.ok { color:var(--up); }
+  .chk.bad { color:var(--down); }
 </style>
 </head>
 <body>
@@ -100,6 +120,7 @@
         <select id="mode">
           <option value="single_chart">single + chart</option>
           <option value="multi_price">multi price</option>
+          <option value="palette_test">palette test</option>
         </select>
       </div>
       <div>
@@ -109,20 +130,61 @@
     </div>
     <div class="row">
       <div>
-        <label>Refresh (seconds)</label>
-        <input id="refreshSec" type="number" min="10" max="3600">
+        <label>Price poll</label>
+        <select id="refreshSec">
+          <option value="30">every 30s</option>
+          <option value="60">every 60s</option>
+          <option value="120">every 2 min</option>
+          <option value="180">every 3 min</option>
+        </select>
       </div>
       <div>
         <label>Timezone</label>
         <input id="tz">
       </div>
     </div>
-    <label>Percentage shown</label>
-    <select id="changeWindow">
-      <option value="chart">chart window - matches the graph</option>
-      <option value="24h">fixed 24 hours</option>
+    <label>Colour depth</label>
+    <select id="bitDepth">
+      <option value="3">3 bit - 8 levels, ~430 Hz</option>
+      <option value="4">4 bit - 16 levels, 221 Hz</option>
+      <option value="5">5 bit - 32 levels, ~110 Hz</option>
+      <option value="6">6 bit - 64 levels, 70 Hz</option>
     </select>
+    <p class="hint">More levels means better colour and more flicker. Saving a change here restarts the device.</p>
+    <p class="hint">Fetches are spread evenly across the poll interval - four feeds at 60s means one request every 15s, not four at once.</p>
+
+    <p class="hint">The percentage is always the 24 hour change, whatever span the chart covers - so it stays comparable between feeds. The chart is coloured by its own direction, so the two can disagree.</p>
     <label><input type="checkbox" id="rotate180"> rotate 180 degrees</label>
+    <label><input type="checkbox" id="wifiSleepCfg"> WiFi power save (off steadies the panel slightly)</label>
+  </div>
+
+  <div class="card">
+    <h2>Palette test</h2>
+    <p class="hint" style="margin-top:0">Colours apply to the panel immediately and are not saved. Switch to the palette screen to see all eleven side by side, or leave it on the chart to judge them in place. Export when you have a set worth keeping.</p>
+    <div class="pal" id="pal"></div>
+    <div class="lv">
+      <button onclick="palReset()">reset to factory</button>
+      <button onclick="palExport()">export as C++</button>
+    </div>
+    <textarea id="palOut" class="hide" readonly></textarea>
+
+    <label>Panel shows</label>
+    <div class="lv">
+      <button onclick="setMode('single_chart')">normal</button>
+      <button onclick="setMode('palette_test')">palette</button>
+      <button onclick="setMode('ramp_test')">ramp</button>
+    </div>
+    <p class="hint">Ramp values left to right: 255, 180, 130, 95, 70, 50, 35, 25.</p>
+
+    <label>Brightness step</label>
+    <div class="lv" id="levels"></div>
+
+    <label>Isolate flicker sources</label>
+    <div class="lv">
+      <button id="btnFetch" onclick="toggleFetch()">fetching: ?</button>
+      <button id="btnSleep" onclick="toggleSleep()">wifi save: ?</button>
+    </div>
+    <p class="hint">Fetching off stops all exchange polling - four feeds at 30s means a TLS handshake every ~7.5s. WiFi save off keeps the radio awake instead of waking on every beacon. Watch the panel with each off in turn. Nothing here is saved; a reset restores normal operation.</p>
   </div>
 
   <button class="primary" id="saveAll" onclick="saveConfig()">Save settings</button>
@@ -134,6 +196,15 @@
     <input type="file" id="fw" accept=".bin">
     <div style="height:8px"></div>
     <button onclick="upload()">Upload and restart</button>
+    <div style="height:14px"></div>
+    <label>CoinGecko API key <span id="keyState" class="chk"></span></label>
+    <input id="cgKey" type="password" placeholder="leave blank to clear">
+    <div style="height:8px"></div>
+    <button onclick="saveApiKey()">Save key</button>
+    <p class="hint">Only needed for coingecko feeds. Its free tier allows roughly 10k calls a month, so keep the poll interval high - coingecko is for coins Binance does not list, not for fast updates. Stored on the device, never sent back to this page.</p>
+    <div style="height:14px"></div>
+    <button onclick="restoreDefaults()">Restore default settings</button>
+    <p class="hint">Resets feeds and display settings to BTC, ETH, SOL, ZEC. WiFi credentials are untouched.</p>
     <div style="height:14px"></div>
     <button class="danger" onclick="forget()">Forget WiFi</button>
   </div>
@@ -166,11 +237,29 @@ async function api(path, opts) {
 
 async function loadStatus() {
   const s = await api('/api/status');
+  lastStatus = s;
+
+  const bf = $('btnFetch'), bs = $('btnSleep');
+  if (bf) {
+    bf.textContent = 'fetching: ' + (s.fetchPaused ? 'OFF' : 'on');
+    bf.classList.toggle('on', !!s.fetchPaused);
+  }
+  if (bs) {
+    bs.textContent = 'wifi save: ' + (s.wifiSleep ? 'on' : 'OFF');
+    bs.classList.toggle('on', !s.wifiSleep);
+  }
   $('ver').textContent = 'v' + s.version;
   $('status').textContent = s.mode === 'ap'
     ? 'setup mode - AP ' + s.ssid + ' at ' + s.ip
     : s.ssid + '  ' + s.ip + '  ' + s.rssi + 'dBm  heap ' +
-      Math.round(s.heapFree / 1024) + 'k  up ' + Math.round(s.uptimeSec / 60) + 'm';
+      Math.round(s.heapFree / 1024) + 'k  ' + s.refreshHz + 'Hz  up ' +
+      Math.round(s.uptimeSec / 60) + 'm';
+
+  const ks = $('keyState');
+  if (ks) {
+    ks.textContent = s.hasApiKey ? 'set' : 'not set';
+    ks.className   = 'chk ' + (s.hasApiKey ? 'ok' : '');
+  }
 
   if (s.mode === 'ap') {
     $('wifiCard').classList.remove('hide');
@@ -212,12 +301,54 @@ async function loadConfig() {
   $('brightness').value = cfg.brightness;
   $('briVal').textContent = cfg.brightness + '%';
   $('mode').value        = cfg.mode;
-  $('changeWindow').value = cfg.changeWindow || 'chart';
+  $('bitDepth').value     = cfg.bitDepth || 4;
   $('dwellSec').value    = cfg.dwellSec;
   $('refreshSec').value  = cfg.refreshSec;
   $('tz').value          = cfg.tz;
   $('rotate180').checked = cfg.rotate180;
+  $('wifiSleepCfg').checked = !!cfg.wifiSleep;
   renderFeeds();
+}
+
+// 64 candles fill the panel's 64 columns, so the candle size sets how far back
+// the chart reaches. This is NOT the poll rate - that is "Price poll" below.
+const SPANS = {
+  '5m':  '5h chart',
+  '15m': '16h chart',
+  '1h':  '2.7d chart',
+  '4h':  '11d chart',
+  '1d':  '64d chart'
+};
+
+// Validated in the browser, straight against the exchange - no round trip
+// through the device, so checking a symbol costs it nothing.
+async function checkSymbol(i) {
+  const f  = cfg.feeds[i];
+  const el = $('chk' + i);
+  el.className = 'chk';
+  el.textContent = 'checking...';
+
+  const sym = encodeURIComponent(f.symbol);
+  const url =
+    f.source === 'coinbase'  ? 'https://api.exchange.coinbase.com/products/' + sym + '/ticker' :
+    f.source === 'coingecko' ? 'https://api.coingecko.com/api/v3/simple/price?ids=' + sym + '&vs_currencies=usd'
+                             : 'https://api.binance.com/api/v3/ticker/price?symbol=' + sym;
+
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('no such symbol');
+    const j = await r.json();
+    // CoinGecko answers 200 with {} for an unknown id, and nests the price.
+    const price = f.source === 'coingecko'
+      ? +(j[f.symbol.toLowerCase()] || {}).usd
+      : +j.price;
+    if (!isFinite(price)) throw new Error('no price');
+    el.className = 'chk ok';
+    el.textContent = 'ok - $' + price.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  } catch (e) {
+    el.className = 'chk bad';
+    el.textContent = 'not found on ' + f.source;
+  }
 }
 
 function renderFeeds() {
@@ -227,7 +358,13 @@ function renderFeeds() {
         <button class="x" onclick="delFeed(${i})">x</button></div>
       <div class="row">
         <div><label>Symbol</label>
-          <input value="${f.symbol}" oninput="cfg.feeds[${i}].symbol=this.value"></div>
+          <div class="symrow">
+            <input value="${f.symbol}" placeholder="${f.source === 'coingecko' ? 'bitcoin' : 'BTCUSDT'}"
+                   oninput="cfg.feeds[${i}].symbol = cfg.feeds[${i}].source === 'coingecko'
+                            ? this.value.toLowerCase().trim() : this.value.toUpperCase().trim()">
+            <button onclick="checkSymbol(${i})">check</button>
+          </div>
+          <p class="chk" id="chk${i}"></p></div>
         <div><label>Label</label>
           <input value="${f.label}" oninput="cfg.feeds[${i}].label=this.value"></div>
       </div>
@@ -236,11 +373,12 @@ function renderFeeds() {
           <select onchange="cfg.feeds[${i}].source=this.value">
             <option value="binance" ${f.source === 'binance' ? 'selected' : ''}>binance</option>
             <option value="coinbase" ${f.source === 'coinbase' ? 'selected' : ''}>coinbase</option>
+            <option value="coingecko" ${f.source === 'coingecko' ? 'selected' : ''}>coingecko</option>
           </select></div>
-        <div><label>Interval</label>
+        <div><label>Chart candle</label>
           <select onchange="cfg.feeds[${i}].interval=this.value">
-            ${['5m','15m','1h','4h','1d'].map(v =>
-              `<option ${f.interval === v ? 'selected' : ''}>${v}</option>`).join('')}
+            ${Object.entries(SPANS).map(([v, span]) =>
+              `<option value="${v}" ${f.interval === v ? 'selected' : ''}>${v} - ${span}</option>`).join('')}
           </select></div>
         <div><label>Decimals</label>
           <input type="number" min="0" max="8" value="${f.decimals}"
@@ -278,17 +416,158 @@ function liveBrightness() {
 async function saveConfig() {
   cfg.brightness = +$('brightness').value;
   cfg.mode         = $('mode').value;
-  cfg.changeWindow = $('changeWindow').value;
+  cfg.bitDepth     = +$('bitDepth').value;
   cfg.dwellSec   = +$('dwellSec').value;
   cfg.refreshSec = +$('refreshSec').value;
   cfg.tz         = $('tz').value;
   cfg.rotate180  = $('rotate180').checked;
+  cfg.wifiSleep  = $('wifiSleepCfg').checked;
   try {
-    await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
-    toast('saved');
+    const r = await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
     dirty(false);
+    if (r.restarting) {
+      // Colour depth changed, so the device is rebooting to rebuild the panel.
+      toast('saved - restarting for the new colour depth');
+      setTimeout(() => location.reload(), 6000);
+      return;
+    }
+    toast('saved');
     renderFeeds();
   } catch (e) { toast(e.message, true); }
+}
+
+// ---------------------------------------------------------------- palette
+
+// Order matches the panel test screen: top row then bottom row.
+const PAL_KEYS = ['LABEL','PRICE','PCT_UP','PCT_DOWN',
+                  'FILL_UP','TRACE_UP','FILL_DOWN','TRACE_DOWN',
+                  'DIM','ACCENT','STALE'];
+const PAL_DESC = {
+  LABEL:      'symbol, top left',
+  PRICE:      'price line',
+  PCT_UP:     'percent, rising',
+  PCT_DOWN:   'percent, falling',
+  FILL_UP:    'chart fill, rising',
+  TRACE_UP:   'chart trace, rising',
+  FILL_DOWN:  'chart fill, falling',
+  TRACE_DOWN: 'chart trace, falling',
+  DIM:        'secondary text',
+  ACCENT:     'setup screens',
+  STALE:      'old data'
+};
+
+let palette = {};
+let palTimer = null;
+
+async function palLoad() {
+  // Local picks win over the device, so a reboot does not throw away tuning.
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('uptick.palette.v2') || 'null'); } catch (e) {}
+
+  palette = await api('/api/palette');
+  if (saved) {
+    // Only names the firmware still knows about - the set was renamed once.
+    const known = {};
+    PAL_KEYS.forEach(k => { if (saved[k]) known[k] = saved[k]; });
+    if (Object.keys(known).length) {
+      palette = Object.assign(palette, known);
+      palPush(known);
+    }
+  }
+  palRender();
+}
+
+function palRender() {
+  // Handlers are bound after the fact rather than written inline. An inline
+  // oninput would need a quoted argument nested inside an HTML attribute
+  // inside a JS string, which is three levels of quoting and exactly what
+  // broke this the first time.
+  $('pal').innerHTML = PAL_KEYS.map(k =>
+    '<label><input type="color" data-key="' + k + '" value="' + palette[k] + '">' +
+    '<span><b>' + k + '</b><br>' + PAL_DESC[k] + '</span></label>').join('');
+
+  $('pal').querySelectorAll('input[type=color]').forEach(el => {
+    el.oninput = () => palSet(el.dataset.key, el.value);
+  });
+}
+
+function palSet(key, hex) {
+  palette[key] = hex;
+  try { localStorage.setItem('uptick.palette.v2', JSON.stringify(palette)); } catch (e) {}
+
+  // Debounced: a colour input fires continuously while dragging.
+  clearTimeout(palTimer);
+  palTimer = setTimeout(() => palPush({ [key]: hex }), 100);
+}
+
+function palPush(obj) {
+  return fetch('/api/palette', { method:'POST', body: JSON.stringify(obj) });
+}
+
+async function palReset() {
+  await palPush({ reset: true });
+  try { localStorage.removeItem('uptick.palette.v2'); } catch (e) {}
+  palette = await api('/api/palette');
+  palRender();
+  toast('palette back to factory');
+}
+
+function palExport() {
+  const pad = k => (k + '            ').slice(0, 11);
+  const rows = PAL_KEYS.map(k => {
+    const h = palette[k];
+    const r = parseInt(h.slice(1, 3), 16);
+    const g = parseInt(h.slice(3, 5), 16);
+    const b = parseInt(h.slice(5, 7), 16);
+    const n = v => ('  ' + v).slice(-3);
+    return '  { ' + n(r) + ', ' + n(g) + ', ' + n(b) + ' },   // ' + pad(k) + '- ' + PAL_DESC[k];
+  });
+
+  const NL  = String.fromCharCode(10);
+  const out = 'static const Rgb PAL_FACTORY[P_COUNT] = {' + NL +
+              rows.join(NL) + NL + '};';
+  const ta = $('palOut');
+  ta.value = out;
+  ta.classList.remove('hide');
+  ta.select();
+  toast('copy this into display.cpp');
+}
+
+// ---------------------------------------------------------------- test page
+
+const LEVELS = [5, 10, 20, 30, 50, 75, 100];
+
+function renderLevels() {
+  $('levels').innerHTML = LEVELS
+    .map(v => '<button onclick="setLevel(' + v + ')" data-v="' + v + '">' + v + '%</button>')
+    .join('');
+}
+
+function setLevel(v) {
+  $('brightness').value = v;
+  $('briVal').textContent = v + '%';
+  document.querySelectorAll('#levels button')
+    .forEach(b => b.classList.toggle('on', +b.dataset.v === v));
+  fetch('/api/brightness', { method:'POST', body: JSON.stringify({ brightness: v }) });
+}
+
+let lastStatus = {};
+
+function toggleFetch() {
+  const next = !lastStatus.fetchPaused;
+  fetch('/api/fetch', { method:'POST', body: JSON.stringify({ paused: next }) })
+    .then(loadStatus);
+}
+
+function toggleSleep() {
+  const next = !lastStatus.wifiSleep;
+  fetch('/api/wifisleep', { method:'POST', body: JSON.stringify({ sleep: next }) })
+    .then(loadStatus);
+}
+
+function setMode(m) {
+  fetch('/api/mode', { method:'POST', body: JSON.stringify({ mode: m }) })
+    .then(r => toast(r.ok ? 'panel: ' + m : 'failed', !r.ok));
 }
 
 // ---------------------------------------------------------------- maintenance
@@ -304,6 +583,24 @@ function upload() {
     .catch(() => toast('update failed', true));
 }
 
+async function saveApiKey() {
+  try {
+    await api('/api/apikey', { method:'POST', body: JSON.stringify({ key: $('cgKey').value }) });
+    $('cgKey').value = '';
+    toast('key saved');
+    loadStatus();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function restoreDefaults() {
+  if (!confirm('Reset all settings to factory defaults? WiFi stays connected.')) return;
+  try {
+    await api('/api/defaults', { method:'POST' });
+    toast('defaults restored');
+    await loadConfig();
+  } catch (e) { toast(e.message, true); }
+}
+
 async function forget() {
   if (!confirm('Erase stored WiFi credentials and restart into setup mode?')) return;
   await fetch('/api/forget', { method:'POST' });
@@ -312,7 +609,11 @@ async function forget() {
 
 // ---------------------------------------------------------------- boot
 
-loadStatus().then(loadConfig).catch(e => $('status').textContent = 'error: ' + e.message);
+renderLevels();
+loadStatus()
+  .then(loadConfig)
+  .then(palLoad)
+  .catch(e => $('status').textContent = 'error: ' + e.message);
 setInterval(loadStatus, 10000);
 </script>
 </body>

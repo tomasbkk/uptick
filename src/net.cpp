@@ -7,6 +7,7 @@
 #include <Update.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <esp_heap_caps.h>
 
 NetState g_net;
 
@@ -55,6 +56,18 @@ static void handleStatus()
   d["psramFree"]   = ESP.getFreePsram();
   d["uptimeSec"]   = (uint32_t)(millis() / 1000);
   d["refreshHz"]   = displayRefreshHz();
+  d["hasApiKey"]   = marketHasApiKey();
+  d["fetchPaused"] = marketPaused();
+  d["wifiSleep"]   = WiFi.getSleep();
+
+  // Where things actually run, rather than where they are meant to.
+  const DisplayStats ds = displayGetStats();
+  d["refreshLow"]  = ds.low;
+  d["refreshPeak"] = ds.peak;
+  d["refreshDips"] = ds.dips;
+  d["coreDisplay"] = ds.taskCore;
+  d["corePanelISR"]= ds.beginCore;
+  d["coreNet"]     = xPortGetCoreID();
 
   String out;
   serializeJson(d, out);
@@ -70,10 +83,29 @@ static void handlePostConfig()
 {
   if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
 
+  uint8_t depthBefore;
+  { CfgLock lk; depthBefore = g_cfg.bitDepth; }
+
   String err;
   if (!configFromJson(http.arg("plain"), err)) { sendErr(400, err); return; }
 
+  uint8_t depthAfter;
+  { CfgLock lk; depthAfter = g_cfg.bitDepth; }
+
   Serial.println("[net] config updated");
+
+  // Protomatter takes colour depth in its constructor, so it can only change
+  // on a restart. The new value is already persisted, so it is picked up on
+  // the way back up. Tearing down a live DMA chain instead is not worth the
+  // risk for a setting that changes once in a while.
+  if (depthAfter != depthBefore)
+  {
+    Serial.printf("[net] bit depth %u -> %u, restarting\n", depthBefore, depthAfter);
+    sendJson(200, "{\"ok\":true,\"restarting\":true}");
+    delay(400);
+    ESP.restart();
+  }
+
   sendOk();
 }
 
@@ -126,6 +158,139 @@ static void handleFiles()
   String out;
   serializeJson(d, out);
   sendJson(200, out);
+}
+
+// Live mode switch, deliberately not persisted - same reasoning as brightness.
+// Flipping between the test screens and the real one while tuning colours
+// should not write flash on every click, and a reset should land you back on
+// whatever mode you actually saved.
+static void handleMode()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  String m = d["mode"] | "";
+  if (m != "single_chart" && m != "multi_price" && m != "palette_test" && m != "ramp_test")
+  {
+    sendErr(400, "unknown mode");
+    return;
+  }
+
+  {
+    CfgLock lk;
+    g_cfg.mode = m;
+    g_cfgRev++;
+  }
+  sendOk();
+}
+
+// Factory reset of the settings document only - WiFi credentials live in NVS
+// and are deliberately left alone, so this cannot strand the device off the
+// network.
+static void handleDefaults()
+{
+  {
+    CfgLock lk;
+    configDefaults(g_cfg);
+    g_cfgRev++;
+  }
+
+  if (!configSave()) { sendErr(500, "could not write defaults"); return; }
+
+  Serial.println("[net] settings restored to defaults");
+  sendOk();
+}
+
+// Write-only: the key goes in and never comes back out, /api/status reports
+// only whether one is set.
+static void handleApiKey()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  marketSetApiKey(d["key"] | "");
+  sendOk();
+}
+
+// Two live switches for isolating what disturbs the panel. Neither persists.
+//
+// Fetching is the loud one: four feeds at 30 second polling means a full TLS
+// handshake roughly every 7.5 seconds. WiFi power save is the quiet one - the
+// radio wakes on every DTIM beacon whether or not anything is happening.
+static void handleFetch()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  marketSetPaused(d["paused"] | false);
+  sendOk();
+}
+
+static void handleWifiSleep()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  const bool sleep = d["sleep"] | true;
+  WiFi.setSleep(sleep);
+  Serial.printf("[net] wifi power save %s\n", sleep ? "on" : "off");
+  sendOk();
+}
+
+// Live palette tuning. GET returns every entry as hex, POST takes any subset
+// by name. Not persisted: this is for finding a good set against the real
+// panel, after which the values get baked in as factory defaults.
+static void handlePaletteGet()
+{
+  JsonDocument d;
+  for (uint8_t i = 0; i < displayPaletteCount(); i++)
+  {
+    uint8_t r, g, b;
+    displayPaletteGet(i, r, g, b);
+
+    char hex[8];
+    snprintf(hex, sizeof(hex), "#%02x%02x%02x", r, g, b);
+    d[displayPaletteName(i)] = hex;
+  }
+
+  String out;
+  serializeJson(d, out);
+  sendJson(200, out);
+}
+
+static void handlePalettePost()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  if (d["reset"] | false) { displayPaletteReset(); sendOk(); return; }
+
+  uint8_t applied = 0;
+  for (JsonPairConst kv : d.as<JsonObjectConst>())
+  {
+    const char* hex = kv.value().as<const char*>();
+    if (!hex || *hex != '#' || strlen(hex) != 7) continue;
+
+    const long v = strtol(hex + 1, nullptr, 16);
+    if (displayPaletteSet(kv.key().c_str(),
+                          (uint8_t)((v >> 16) & 0xFF),
+                          (uint8_t)((v >> 8)  & 0xFF),
+                          (uint8_t)(v & 0xFF)))
+      applied++;
+  }
+
+  if (!applied) { sendErr(400, "no recognised colour names"); return; }
+  sendOk();
 }
 
 static void handleScan()
@@ -213,6 +378,55 @@ static void handleUpdateUpload()
 
 // ---------------------------------------------------------------- portal
 
+// The web UI is read off LittleFS once at boot and served from RAM thereafter.
+//
+// This is not an optimisation, it is a correctness fix for the panel. Reading
+// from LittleFS goes through spi_flash_read, which disables the instruction
+// cache on BOTH cores for the duration. Anything not resident in IRAM stalls,
+// including Protomatter's refresh ISR - so every page load visibly flickered
+// the display, even though the display runs on the other core.
+//
+// The buffer is forced into internal RAM. Plain malloc() hands out PSRAM for
+// an allocation this size on a board with BOARD_HAS_PSRAM, and while PSRAM
+// reads go through the cache rather than disabling it, PSRAM shares the octal
+// SPI bus with flash on this part. Internal RAM touches neither, and 14 KB out
+// of ~247 KB free is cheap for a buffer read on every page load.
+static char*  s_indexBuf = nullptr;
+static size_t s_indexLen = 0;
+
+static bool preloadIndex()
+{
+  File f = LittleFS.open("/www/index.html", "r");
+  if (!f) { Serial.println("[web] index.html missing"); return false; }
+
+  s_indexLen = f.size();
+  s_indexBuf = (char*)heap_caps_malloc(s_indexLen + 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!s_indexBuf) s_indexBuf = (char*)malloc(s_indexLen + 1);   // PSRAM beats flash
+  if (!s_indexBuf)
+  {
+    Serial.printf("[web] cannot allocate %u bytes for index\n", (unsigned)s_indexLen);
+    s_indexLen = 0;
+    f.close();
+    return false;
+  }
+
+  f.readBytes(s_indexBuf, s_indexLen);
+  s_indexBuf[s_indexLen] = 0;
+  f.close();
+
+  Serial.printf("[web] index cached in RAM, %u bytes\n", (unsigned)s_indexLen);
+  return true;
+}
+
+static void handleNotFound();
+
+static void handleRoot()
+{
+  if (!s_indexBuf) { handleNotFound(); return; }
+  http.sendHeader("Cache-Control", "no-store");
+  http.send(200, "text/html", s_indexBuf);
+}
+
 static void handleNotFound()
 {
   const String uri = http.uri();
@@ -293,6 +507,11 @@ static bool joinSTA(const String& ssid, const String& pass)
 
   g_net.provisioned = true;
   g_net.ip          = WiFi.localIP().toString();
+
+  {
+    CfgLock lk;
+    WiFi.setSleep(g_cfg.wifiSleep);
+  }
   Serial.printf("[net] joined, ip %s rssi %d\n", g_net.ip.c_str(), WiFi.RSSI());
 
   if (MDNS.begin(UPTICK_NAME)) {
@@ -317,14 +536,23 @@ void netBegin()
   http.on("/api/config",     HTTP_GET,  handleGetConfig);
   http.on("/api/config",     HTTP_POST, handlePostConfig);
   http.on("/api/brightness", HTTP_POST, handleBrightness);
+  http.on("/api/mode",       HTTP_POST, handleMode);
+  http.on("/api/defaults",   HTTP_POST, handleDefaults);
+  http.on("/api/apikey",     HTTP_POST, handleApiKey);
+  http.on("/api/fetch",      HTTP_POST, handleFetch);
+  http.on("/api/stats",      HTTP_POST, [](){ displayResetStats(); sendOk(); });
+  http.on("/api/palette",    HTTP_GET,  handlePaletteGet);
+  http.on("/api/palette",    HTTP_POST, handlePalettePost);
+  http.on("/api/wifisleep",  HTTP_POST, handleWifiSleep);
   http.on("/api/files",      HTTP_GET,  handleFiles);
   http.on("/api/scan",       HTTP_GET,  handleScan);
   http.on("/api/wifi",       HTTP_POST, handleWifi);
   http.on("/api/forget",     HTTP_POST, handleForget);
   http.on("/api/update",     HTTP_POST, handleUpdateDone, handleUpdateUpload);
 
-  http.serveStatic("/",           LittleFS, "/www/index.html");
-  http.serveStatic("/index.html", LittleFS, "/www/index.html");
+  preloadIndex();
+  http.on("/",           HTTP_GET, handleRoot);
+  http.on("/index.html", HTTP_GET, handleRoot);
   http.onNotFound(handleNotFound);
 
   http.begin();

@@ -3,6 +3,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 Quote g_quotes[UPTICK_MAX_FEEDS];
 SemaphoreHandle_t g_quoteMutex = nullptr;
@@ -16,6 +17,34 @@ extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_star
 #endif
 
 static uint32_t s_lastAttemptMs[UPTICK_MAX_FEEDS] = {0};
+static uint32_t s_lastAnyFetchMs = 0;
+
+// Cached in RAM: reading NVS is a flash access, and flash accesses stall the
+// panel's refresh. Loaded once at boot, updated when the key is changed.
+static String s_cgKey;
+static volatile bool s_paused = false;
+
+void marketSetPaused(bool paused)
+{
+  s_paused = paused;
+  Serial.printf("[mkt] fetching %s\n", paused ? "paused" : "resumed");
+}
+
+bool marketPaused() { return s_paused; }
+
+bool marketHasApiKey() { return s_cgKey.length() > 0; }
+
+void marketSetApiKey(const String& key)
+{
+  Preferences prefs;
+  prefs.begin("uptick", false);
+  if (key.isEmpty()) prefs.remove("cgkey");
+  else               prefs.putString("cgkey", key);
+  prefs.end();
+
+  s_cgKey = key;
+  Serial.printf("[mkt] coingecko key %s\n", key.isEmpty() ? "cleared" : "set");
+}
 
 // ---------------------------------------------------------------- parsing
 
@@ -35,11 +64,26 @@ static int extractField(Stream& s, int wantIdx, float* out, int maxOut)
   const uint32_t deadline = millis() + 15000;   // whole-response budget
   uint32_t       lastData = millis();           // idle budget
 
+  // Keeps the LAST maxOut values rather than the first. Binance returns
+  // exactly what was asked for, but CoinGecko chooses its own granularity and
+  // can return hundreds of points - and the recent end is the interesting one.
   auto flush = [&]()
   {
     if (!capture) return;
     buf[blen] = 0;
-    if (n < maxOut) out[n++] = atof(buf);
+
+    const float v = atof(buf);
+    if (n < maxOut)
+    {
+      out[n] = v;
+    }
+    else
+    {
+      memmove(out, out + 1, sizeof(float) * (maxOut - 1));
+      out[maxOut - 1] = v;
+    }
+    n++;
+
     capture = false;
     blen    = 0;
   };
@@ -103,6 +147,18 @@ static int extractField(Stream& s, int wantIdx, float* out, int maxOut)
 
 // ---------------------------------------------------------------- adapters
 
+// CoinGecko does not take a candle size - it picks granularity from the range
+// requested: 1 day gives 5-minutely, 2 to 90 days gives hourly, beyond that
+// daily. So the interval maps onto a range whose granularity is closest, and
+// the last 64 points of whatever comes back are charted. 4h has no equivalent
+// and behaves as hourly.
+static uint16_t coingeckoDays(const String& interval)
+{
+  if (interval == "5m" || interval == "15m") return 1;    // 5-minutely
+  if (interval == "1h" || interval == "4h")  return 3;    // hourly
+  return 365;                                             // daily
+}
+
 static uint32_t coinbaseGranularity(const String& interval)
 {
   // Coinbase only accepts this fixed set. 4h has no equivalent, so it rounds
@@ -121,6 +177,14 @@ static uint32_t feedBarSeconds(const Feed& f)
 {
   if (f.source == "coinbase") return coinbaseGranularity(f.interval);
 
+  if (f.source == "coingecko")
+  {
+    // Granularity follows the range: 1 day is 5-minutely, up to 90 is hourly,
+    // beyond that daily.
+    const uint16_t days = coingeckoDays(f.interval);
+    return days <= 1 ? 300 : (days <= 90 ? 3600 : 86400);
+  }
+
   if (f.interval == "5m")  return 300;
   if (f.interval == "15m") return 900;
   if (f.interval == "1h")  return 3600;
@@ -131,6 +195,13 @@ static uint32_t feedBarSeconds(const Feed& f)
 
 static String buildUrl(const Feed& f)
 {
+  if (f.source == "coingecko")
+  {
+    // Symbol is the CoinGecko coin id here - "bitcoin", not "BTCUSDT".
+    return "https://api.coingecko.com/api/v3/coins/" + f.symbol +
+           "/market_chart?vs_currency=usd&days=" + String(coingeckoDays(f.interval));
+  }
+
   if (f.source == "coinbase")
   {
     return "https://api.exchange.coinbase.com/products/" + f.symbol +
@@ -167,13 +238,17 @@ static bool fetch24h(const Feed& f, float& pct)
   HTTPClient       https;
   prepareClient(client, https);
 
-  const bool coinbase = (f.source == "coinbase");
+  const bool coinbase  = (f.source == "coinbase");
+  const bool coingecko = (f.source == "coingecko");
 
-  String url = coinbase
-    ? "https://api.exchange.coinbase.com/products/" + f.symbol + "/stats"
-    : "https://api.binance.com/api/v3/ticker/24hr?symbol=" + f.symbol;
+  String url =
+    coingecko ? "https://api.coingecko.com/api/v3/simple/price?ids=" + f.symbol +
+                "&vs_currencies=usd&include_24hr_change=true"
+  : coinbase  ? "https://api.exchange.coinbase.com/products/" + f.symbol + "/stats"
+              : "https://api.binance.com/api/v3/ticker/24hr?symbol=" + f.symbol;
 
   if (!https.begin(client, url)) return false;
+  if (coingecko && s_cgKey.length()) https.addHeader("x-cg-demo-api-key", s_cgKey);
 
   if (https.GET() != HTTP_CODE_OK)
   {
@@ -184,14 +259,23 @@ static bool fetch24h(const Feed& f, float& pct)
   // An object, not an array, so ArduinoJson filtering works here - it can
   // select by key even though it cannot select by array index.
   JsonDocument filter;
-  if (coinbase) { filter["open"] = true; filter["last"] = true; }
-  else          { filter["priceChangePercent"] = true; }
+  if      (coingecko) { filter[f.symbol]["usd_24h_change"] = true; }
+  else if (coinbase)  { filter["open"] = true; filter["last"] = true; }
+  else                { filter["priceChangePercent"] = true; }
 
   JsonDocument doc;
   DeserializationError e = deserializeJson(doc, https.getStream(),
                                            DeserializationOption::Filter(filter));
   https.end();
   if (e) return false;
+
+  if (coingecko)
+  {
+    JsonVariantConst v = doc[f.symbol]["usd_24h_change"];
+    if (v.isNull()) return false;
+    pct = v.as<float>();
+    return true;
+  }
 
   if (coinbase)
   {
@@ -208,7 +292,7 @@ static bool fetch24h(const Feed& f, float& pct)
   return true;
 }
 
-static bool fetchFeed(const Feed& f, Quote& q, bool want24h)
+static bool fetchFeed(const Feed& f, Quote& q)
 {
   WiFiClientSecure client;
   HTTPClient       https;
@@ -229,9 +313,15 @@ static bool fetchFeed(const Feed& f, Quote& q, bool want24h)
     return false;
   }
 
+  // Binance klines and Coinbase candles both put the close at index 4.
+  // CoinGecko's market_chart is [[timestamp, price], ...], so index 1.
+  const int closeIdx = (f.source == "coingecko") ? 1 : 4;
+
   float raw[UPTICK_MAX_POINTS];
-  int   n = extractField(https.getStream(), 4, raw, UPTICK_MAX_POINTS);
+  int   n = extractField(https.getStream(), closeIdx, raw, UPTICK_MAX_POINTS);
   https.end();
+
+  if (n > UPTICK_MAX_POINTS) n = UPTICK_MAX_POINTS;   // flush kept the newest
 
   if (n < 2)
   {
@@ -265,23 +355,20 @@ static bool fetchFeed(const Feed& f, Quote& q, bool want24h)
   float change24h = 0.0f;
   bool  has24h    = false;
 
-  if (want24h)
+  const uint32_t bars = 86400UL / feedBarSeconds(f);
+  if (bars >= 1 && (int)bars < n)
   {
-    uint32_t bars = 86400UL / feedBarSeconds(f);
-    if (bars >= 1 && (int)bars < n)
+    const float ref = raw[n - 1 - bars];
+    if (ref > 0.0f)
     {
-      float ref = raw[n - 1 - bars];
-      if (ref > 0.0f)
-      {
-        change24h = (raw[n - 1] - ref) / ref * 100.0f;
-        has24h    = true;
-      }
+      change24h = (raw[n - 1] - ref) / ref * 100.0f;
+      has24h    = true;
     }
-    else
-    {
-      has24h = fetch24h(f, change24h);
-      if (!has24h) Serial.printf("[mkt] %s: 24h lookup failed\n", f.symbol.c_str());
-    }
+  }
+  else
+  {
+    has24h = fetch24h(f, change24h);
+    if (!has24h) Serial.printf("[mkt] %s: 24h lookup failed\n", f.symbol.c_str());
   }
 
   {
@@ -303,8 +390,12 @@ static bool fetchFeed(const Feed& f, Quote& q, bool want24h)
     q.failures  = 0;
   }
 
-  Serial.printf("[mkt] %s %.4f %+.2f%% (%d pts)\n",
-                f.symbol.c_str(), q.price, q.changePct, n);
+  // Both figures, because they legitimately differ: the panel prints the 24h
+  // change while the chart is coloured by its own window.
+  Serial.printf("[mkt] %s %.4f  24h %+.2f%%%s  chart %+.2f%%  (%d pts)\n",
+                f.symbol.c_str(), q.price,
+                has24h ? change24h : 0.0f, has24h ? "" : "?",
+                q.changePct, n);
   return true;
 }
 
@@ -313,10 +404,16 @@ static bool fetchFeed(const Feed& f, Quote& q, bool want24h)
 void marketBegin()
 {
   g_quoteMutex = xSemaphoreCreateMutex();
+
+  Preferences prefs;
+  prefs.begin("uptick", true);
+  s_cgKey = prefs.getString("cgkey", "");
+  prefs.end();
 }
 
 void marketPoll()
 {
+  if (s_paused) return;
   if (g_net.apMode || WiFi.status() != WL_CONNECTED) return;
 
   // Cached copy; only re-taken when the config actually changes. This runs off
@@ -330,14 +427,40 @@ void marketPoll()
     seenRev = g_cfgRev;
   }
 
-  // Refresh whichever feed is most overdue, one per call. That naturally
-  // staggers the requests instead of firing N TLS handshakes back to back.
-  int      pick     = -1;
-  uint32_t oldest   = 0;
-  uint32_t now      = millis();
+  const uint32_t now   = millis();
+  const uint8_t  feeds = cfg.feedCount ? cfg.feedCount : 1;
+
+  // Poll only what is on screen.
+  //
+  // A feed nobody is looking at does not need fresh data, and fetching it
+  // disturbs the panel showing something else. Gating on the visible feed puts
+  // every fetch at a screen transition - the moment a glitch is least
+  // noticeable, because the content is changing anyway - and leaves the rest
+  // of the dwell completely quiet.
+  //
+  // The cost is that effective refresh becomes the rotation period rather than
+  // the poll interval: a feed that comes due just after leaving the screen
+  // waits until its next turn.
+  const int visible = displayVisibleFeed();
+
+  // With one feed eligible there is nothing to space out, and a minimum gap
+  // would be actively harmful - it could block the visible feed's only window
+  // and strand it stale for a whole rotation. Spacing applies only when every
+  // feed is a candidate.
+  if (visible < 0)
+  {
+    const uint32_t minGap = (uint32_t)cfg.refreshSec * 1000UL / feeds;
+    if (s_lastAnyFetchMs && (now - s_lastAnyFetchMs) < minGap) return;
+  }
+
+  // Refresh whichever eligible feed is most overdue, one per call.
+  int      pick   = -1;
+  uint32_t oldest = 0;
 
   for (uint8_t i = 0; i < cfg.feedCount; i++)
   {
+    if (visible >= 0 && i != (uint8_t)visible) continue;
+
     uint32_t age = now - s_lastAttemptMs[i];
 
     uint32_t due = (uint32_t)cfg.refreshSec * 1000UL;
@@ -359,7 +482,8 @@ void marketPoll()
   if (pick < 0) return;
 
   s_lastAttemptMs[pick] = now;
-  if (!fetchFeed(cfg.feeds[pick], g_quotes[pick], cfg.changeWindow == "24h"))
+  s_lastAnyFetchMs      = now;
+  if (!fetchFeed(cfg.feeds[pick], g_quotes[pick]))
   {
     QuoteLock lk;
     g_quotes[pick].failures++;
