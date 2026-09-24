@@ -3,7 +3,7 @@
 #include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.22.0"
+#define UPTICK_VERSION   "0.22.1"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 

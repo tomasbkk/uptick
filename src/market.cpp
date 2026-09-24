@@ -211,6 +211,7 @@ static int extractYahoo(Stream& s, float* out, int maxOut, YahooMeta& meta,
   uint8_t target = T_NONE;
   bool    inCcy  = false;
   int8_t  sec    = -1;          // which session object we are inside, if any
+  int     depth  = 0;           // object nesting; 0 again means the document ended
 
   char    buf[24];
   uint8_t blen = 0;
@@ -306,20 +307,25 @@ static int extractYahoo(Stream& s, float* out, int maxOut, YahooMeta& meta,
       if (target == T_TS || target == T_CLOSE)
       {
         if (c == ',') { if (target == T_CLOSE) idx++; continue; }
-        if (c == ']')
-        {
-          // Nothing after the close array is wanted.
-          if (target == T_CLOSE) return finish();
-          target = T_NONE;
-          continue;
-        }
+        if (c == ']') target = T_NONE;
         continue;                 // the letters of a null
       }
       target = T_NONE;
       // Falls through: this character still has to reach the matchers.
     }
 
-    if (c == '}') sec = -1;
+    // The whole document is read, to its closing brace. Yahoo does not keep its
+    // fields in order: the chart request has sent timestamp before indicators,
+    // and the extended request has sent them the other way round - which is
+    // what stopping at the end of the close array missed, leaving pre-market
+    // with no trade time and so showing as closed. None of the strings in a
+    // chart response contain braces, so counting them is enough.
+    if (c == '{') depth++;
+    if (c == '}')
+    {
+      sec = -1;
+      if (--depth == 0) return finish();
+    }
 
     if (kPct.step(c))   { target = T_PCT;   blen = 0; }
     if (kTime.step(c))  { target = T_TIME;  blen = 0; }
@@ -639,7 +645,11 @@ static bool fetchYahooExtended(const Feed& f, float& price, uint32_t& ts)
   const int n = extractYahoo(https.getStream(), &last, 1, meta, tsBuf, 300);
   https.end();
 
-  if (n < 1 || meta.lastTs == 0) return false;
+  if (n < 1 || meta.lastTs == 0)
+  {
+    Serial.printf("[mkt] %s extended: %s\n", f.symbol.c_str(), n < 1 ? "no price" : "no trade time");
+    return false;
+  }
   price = last;
   ts    = meta.lastTs;
   return true;
