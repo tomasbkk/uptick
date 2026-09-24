@@ -404,19 +404,26 @@ static uint8_t marketState(const Quote& q)
   return MKT_CLOSED;
 }
 
-// 7x7, the height of the big font's digits, so an icon sits level with the
-// price beside it. One byte per row, leftmost pixel in the top bit.
-static const int16_t ICON_W = 7;
+// 7 rows, the height of the big font's digits, so an icon sits level with the
+// price beside it. Rows are whole bytes, leftmost pixel in the top bit, so the
+// 9-wide sun takes two bytes a row and the 7-wide icons one.
+static const int16_t ICON_H = 7;
 
-static const uint8_t ICON_SUN[7] = {     // rising over the horizon: pre-market
-  0x92,   // #..#..#
-  0x00,   // .......
-  0x38,   // ..###..
-  0x7C,   // .#####.
-  0x7C,   // .#####.
-  0x00,   // .......
-  0xFE,   // #######
+// Rising over the horizon: pre-market. Six single-pixel rays in a fan, each
+// kept a pixel clear of the sun and of each other so they read as separate
+// points rather than merging into a blob. That needs the 9 columns.
+static const int16_t ICON_SUN_W = 9;
+static const uint8_t ICON_SUN[7 * 2] = {
+  0x14, 0x00,   // ...#.#...
+  0x41, 0x00,   // .#.....#.
+  0x1C, 0x00,   // ...###...
+  0xBE, 0x80,   // #.#####.#
+  0x3E, 0x00,   // ..#####..
+  0x00, 0x00,   // .........
+  0xFF, 0x80,   // #########
 };
+
+static const int16_t ICON_W = 7;         // the moon and the padlock
 
 static const uint8_t ICON_MOON[7] = {    // crescent: after hours
   0x38,   // ..###..
@@ -438,13 +445,20 @@ static const uint8_t ICON_CLOSED[7] = {  // padlock: market closed
   0xFE,   // #######
 };
 
-static void drawMarketIcon(int16_t x, int16_t yTop, uint8_t state)
+static int16_t marketIconWidth(uint8_t state)
 {
+  return state == MKT_PRE ? ICON_SUN_W : ICON_W;
+}
+
+// Right-aligned, so every icon ends at the panel edge whatever its width.
+static void drawMarketIcon(int16_t yTop, uint8_t state)
+{
+  const int16_t x = PANEL_W - marketIconWidth(state);
   switch (state)
   {
-    case MKT_PRE:    matrix->drawBitmap(x, yTop, ICON_SUN,    ICON_W, 7, C_SUN());    break;
-    case MKT_POST:   matrix->drawBitmap(x, yTop, ICON_MOON,   ICON_W, 7, C_MOON());   break;
-    case MKT_CLOSED: matrix->drawBitmap(x, yTop, ICON_CLOSED, ICON_W, 7, C_CLOSED()); break;
+    case MKT_PRE:    matrix->drawBitmap(x, yTop, ICON_SUN,    ICON_SUN_W, ICON_H, C_SUN());    break;
+    case MKT_POST:   matrix->drawBitmap(x, yTop, ICON_MOON,   ICON_W,     ICON_H, C_MOON());   break;
+    case MKT_CLOSED: matrix->drawBitmap(x, yTop, ICON_CLOSED, ICON_W,     ICON_H, C_CLOSED()); break;
   }
 }
 
@@ -644,8 +658,8 @@ static void drawQuoteHeader(const Feed& f, const Quote& q, bool stale, int16_t y
   else
   {
     drawPriceLine(yTop + 8, q.price, f.decimals, C_PRICE(), withCurrency ? ccyPrefix(q) : "",
-                  PANEL_W - ICON_W - 2);
-    drawMarketIcon(PANEL_W - ICON_W, yTop + 8, market);
+                  PANEL_W - marketIconWidth(market) - 2);
+    drawMarketIcon(yTop + 8, market);
   }
 }
 
