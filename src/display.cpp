@@ -466,16 +466,17 @@ static void drawMarketIcon(int16_t yTop, uint8_t state)
 
 // ---------------------------------------------------------------- chart
 
-// Solid fill in the trend colour, under a lighter trace along its top edge.
+// The row of the chart's top edge in every column, which is also where snow
+// settles on it. False when there are too few points to draw a chart.
 //
 // noinline, and the flat-window check is an if outside the loop rather than a
 // ?: inside it: inlined into drawSingleChart, that conditional float made the
 // Xtensa GCC fail with an internal compiler error ("insn does not satisfy its
 // constraints"), and which caller it was inlined into decided whether it did.
-static void __attribute__((noinline)) drawChart(const Quote& q, int16_t yTop, int16_t yBot,
-                                                uint16_t fill, uint16_t trace)
+static bool __attribute__((noinline)) chartColumns(const Quote& q, int16_t yTop, int16_t yBot,
+                                                   int16_t* colY)
 {
-  if (q.count < 2) return;
+  if (q.count < 2) return false;
 
   const int16_t span = yBot - yTop;
 
@@ -489,7 +490,6 @@ static void __attribute__((noinline)) drawChart(const Quote& q, int16_t yTop, in
     base  = 0.0f;
   }
 
-  int16_t colY[PANEL_W];
   for (int16_t x = 0; x < PANEL_W; x++)
   {
     // Resample onto the panel width. With limit=64 from the exchange this is
@@ -504,7 +504,12 @@ static void __attribute__((noinline)) drawChart(const Quote& q, int16_t yTop, in
     const float norm = base + (v - q.lo) * scale;
     colY[x] = yBot - (int16_t)lroundf(norm * span);
   }
+  return true;
+}
 
+// Solid fill in the trend color, under a lighter trace along its top edge.
+static void drawChart(const int16_t* colY, int16_t yBot, uint16_t fill, uint16_t trace)
+{
   // Fill first, then lay the trace over it.
   for (int16_t x = 0; x < PANEL_W; x++)
     matrix->drawLine(x, colY[x], x, yBot, fill);
@@ -534,18 +539,21 @@ static void __attribute__((noinline)) drawChart(const Quote& q, int16_t yTop, in
 
 // Falling snow, the Christmas theme. It is drawn straight after the frame is
 // cleared and before anything else, so it falls behind the content: flakes
-// show between the letters and disappear behind the chart, and never cover a
-// figure.
+// show between the letters and never cover a figure.
 //
 // Two layers give it depth. Near flakes are brighter, fall faster and sway
-// wider; far ones are a dimmer shade of the same color and slower. Positions
-// are floats moved by the real time since the last frame rather than a fixed
-// step per frame - the tickers run at whatever frame rate their scroll speed
-// sets, and the snow has to fall at the same pace in every mode.
+// wider; far ones are a dimmer shade of the same color, slower and narrower.
+// Positions are floats moved by the real time since the last frame rather than
+// a fixed step per frame - the tickers run at whatever frame rate their scroll
+// speed sets, and the snow has to fall at the same pace in every mode.
+//
+// On the chart screen the near flakes land on the chart and settle there (see
+// snowLand); the far ones keep falling and pass behind it, which is what sells
+// the depth.
 struct Flake
 {
-  float   x, y;     // pixels; y below the panel means it is due a respawn
-  float   vy;       // fall speed, pixels per second
+  float   x, y;     // pixels, before the sway; y below the panel means respawn
+  float   vx, vy;   // drift and fall, pixels per second
   float   phase;    // position in its sideways sway, radians
   float   rate;     // sway speed, radians per second
   float   amp;      // sway width, pixels either side
@@ -556,10 +564,22 @@ static const uint8_t SNOW_NEAR = 8;
 static const uint8_t SNOW_FAR  = 14;
 static const uint8_t SNOW_FPS  = 30;     // chart mode's frame rate while it snows
 
-static Flake    s_snow[SNOW_NEAR + SNOW_FAR];
-static bool     s_snowOn     = false;    // set by the task from cfg.theme every pass
-static bool     s_snowReady  = false;    // flakes placed since the theme came on
-static uint32_t s_snowLastUs = 0;
+// Settled snow. At most PILE_MAX pixels deep in a column, and never up into
+// the header rows above PILE_TOP_MIN. One pixel melts every MELT_SEC, so a
+// feed that stays up for a long time keeps a dusting rather than filling in.
+static const uint8_t PILE_MAX     = 3;
+static const int16_t PILE_TOP_MIN = 16;
+static const float   MELT_SEC     = 2.5f;
+
+static Flake          s_snow[SNOW_NEAR + SNOW_FAR];
+static bool           s_snowOn     = false;    // set by the task from cfg.theme every pass
+static bool           s_snowReady  = false;    // flakes placed since the theme came on
+static uint32_t       s_snowLastUs = 0;
+
+static const int16_t* s_surf    = nullptr;     // chart top per column, while a chart is drawing
+static const void*    s_surfKey = nullptr;     // which feed's chart the pile is lying on
+static uint8_t        s_pile[PANEL_W];
+static float          s_meltAcc = 0;
 
 // xorshift32. The flakes need nothing better than "looks random".
 static uint32_t s_rng = 0x9E3779B9;
@@ -582,15 +602,17 @@ static void flakeSpawn(Flake& f, bool anywhere)
 
   if (f.near)
   {
-    f.vy   = rnd(8.0f, 12.0f);
-    f.rate = 1.6f;
-    f.amp  = 1.5f;
+    f.vy   = rnd(4.0f, 6.0f);
+    f.vx   = rnd(-1.0f, 1.0f);
+    f.amp  = rnd(2.0f, 3.5f);
+    f.rate = rnd(0.6f, 1.2f);
   }
   else
   {
-    f.vy   = rnd(3.5f, 6.0f);
-    f.rate = 1.1f;
-    f.amp  = 0.8f;
+    f.vy   = rnd(2.0f, 3.5f);
+    f.vx   = rnd(-0.6f, 0.6f);
+    f.amp  = rnd(1.0f, 2.0f);
+    f.rate = rnd(0.5f, 1.0f);
   }
   f.phase = rnd(0, 6.2832f);
 }
@@ -603,8 +625,64 @@ static void snowReset()
     s_snow[i].near = i < SNOW_NEAR;
     flakeSpawn(s_snow[i], true);
   }
+  memset(s_pile, 0, sizeof(s_pile));
+  s_surfKey    = nullptr;
+  s_meltAcc    = 0;
   s_snowLastUs = micros();
   s_snowReady  = true;
+}
+
+// The chart hands over its column tops before it clears, so the snow knows
+// where to land; nullptr for every other screen. key names the feed whose
+// chart it is - a different one starts with bare ground, since the snow was
+// lying on a chart that is no longer there.
+static void snowSurface(const int16_t* colY, const void* key)
+{
+  if (key != s_surfKey)
+  {
+    memset(s_pile, 0, sizeof(s_pile));
+    s_meltAcc = 0;
+    s_surfKey = key;
+  }
+  s_surf = colY;
+}
+
+// Highest settled row in a column: the chart's top edge, less any snow on it.
+static int16_t groundTop(int16_t x)
+{
+  return s_surf[x] - s_pile[x];
+}
+
+// A flake has reached the ground at column x. It rolls downhill first: while
+// a neighbour lies two or more rows lower it moves there, so snow gathers in
+// the chart's dips instead of balancing on its peaks - the way it slides off
+// anything steeper than it can rest on. A full column, or one already up
+// against the header, takes no more; that flake just melts on arrival.
+static void snowLand(int16_t x)
+{
+  for (uint8_t step = 0; step < 8; step++)
+  {
+    int16_t best = x;
+    if (x > 0           && groundTop(x - 1) > groundTop(best) + 1) best = x - 1;
+    if (x < PANEL_W - 1 && groundTop(x + 1) > groundTop(best) + 1) best = x + 1;
+    if (best == x) break;
+    x = best;
+  }
+
+  if (s_pile[x] >= PILE_MAX)            return;
+  if (groundTop(x) - 1 < PILE_TOP_MIN)  return;
+  s_pile[x]++;
+}
+
+// Takes one pixel off a random column that has any. A few tries rather than a
+// search: if the ground is nearly bare, missing a melt does not matter.
+static void snowMelt()
+{
+  for (uint8_t tries = 0; tries < 8; tries++)
+  {
+    const int16_t x = (int16_t)rnd(0, PANEL_W - 1);
+    if (s_pile[x]) { s_pile[x]--; return; }
+  }
 }
 
 // noinline so the per-frame loop exists once rather than being copied into
@@ -612,6 +690,7 @@ static void snowReset()
 static void __attribute__((noinline)) drawSnow()
 {
   if (!s_snowReady) snowReset();
+  if (!s_surf) s_surfKey = nullptr;        // off the chart: bare ground when it returns
 
   // Capped, so a pause - a mode switch, a slow frame - does not throw every
   // flake a screen's height in one step.
@@ -630,19 +709,52 @@ static void __attribute__((noinline)) drawSnow()
   for (Flake& f : s_snow)
   {
     f.y += f.vy * dt;
-    if (f.y >= PANEL_H) flakeSpawn(f, false);
+    f.x += f.vx * dt;
+    if (f.x < 0)        f.x += PANEL_W;
+    if (f.x >= PANEL_W) f.x -= PANEL_W;
 
     // The sway advances by dt too, rather than being a sine of the uptime,
     // which as a float loses the precision to move smoothly after a few days.
     f.phase += f.rate * dt;
     if (f.phase > 6.2832f) f.phase -= 6.2832f;
 
-    const float sway = sinf(f.phase) * f.amp;
-    int16_t x = (int16_t)lroundf(f.x + sway);
+    int16_t x = (int16_t)lroundf(f.x + sinf(f.phase) * f.amp);
     x = (int16_t)((x % PANEL_W + PANEL_W) % PANEL_W);
     const int16_t y = (int16_t)floorf(f.y);
+
+    // Lands when it reaches the row above the ground. Only within a couple of
+    // rows of it, though: a flake that is already well below - placed there
+    // when the theme came on, or overtaken by a new chart that rose past it -
+    // is behind the chart, and carries on falling out of sight.
+    if (f.near && s_surf && y >= 0)
+    {
+      const int16_t top = groundTop(x);
+      if (y >= top - 1 && y <= top + 1)
+      {
+        snowLand(x);
+        flakeSpawn(f, false);
+        continue;
+      }
+    }
+
+    if (f.y >= PANEL_H) { flakeSpawn(f, false); continue; }
     if (y >= 0) matrix->drawPixel(x, y, f.near ? cNear : cFar);
   }
+
+  if (!s_surf) return;
+
+  s_meltAcc += dt;
+  while (s_meltAcc >= MELT_SEC)
+  {
+    s_meltAcc -= MELT_SEC;
+    snowMelt();
+  }
+
+  // The settled snow, stacked up from the chart's top edge. The chart is drawn
+  // after this, but only from its top edge down, so it never covers the pile.
+  for (int16_t x = 0; x < PANEL_W; x++)
+    for (uint8_t k = 1; k <= s_pile[x]; k++)
+      matrix->drawPixel(x, s_surf[x] - k, cNear);
 }
 
 // Every feed screen starts here instead of a bare fillScreen, so a theme's
@@ -652,6 +764,7 @@ static void clearFrame()
 {
   matrix->fillScreen(0);
   if (s_snowOn) drawSnow();
+  s_surf = nullptr;                      // only good for the frame that set it
 }
 
 // ---------------------------------------------------------------- screens
@@ -804,14 +917,20 @@ static void drawQuoteHeader(const Feed& f, const Quote& q, bool stale, int16_t y
 
 static void drawSingleChart(const Config& cfg, const Feed& f, const Quote& q, bool stale)
 {
+  // The chart's shape is worked out before the frame is cleared, so the snow,
+  // drawn as part of the clear, knows where to land.
+  int16_t    colY[PANEL_W];
+  const bool haveChart = chartColumns(q, 16, PANEL_H - 1, colY);
+  snowSurface(haveChart ? colY : nullptr, &f);
   clearFrame();
 
   // Rows 0-14: label, change and price, with the market icon for stocks.
   drawQuoteHeader(f, q, stale, 0, true, marketState(q));
 
-  // Rows 16-31: chart, coloured by its own window rather than the 24h figure.
+  // Rows 16-31: chart, colored by its own window rather than the 24h figure.
+  if (!haveChart) return;
   const bool chartUp = q.changePct >= 0.0f;
-  drawChart(q, 16, PANEL_H - 1,
+  drawChart(colY, PANEL_H - 1,
             chartUp ? C_FILL_UP()  : C_FILL_DOWN(),
             chartUp ? C_TRACE_UP() : C_TRACE_DOWN());
 }

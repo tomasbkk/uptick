@@ -304,11 +304,19 @@ A list of one or two fits the panel as it is and does not move.
 
 A theme is an animated layer behind the feeds, picked on the Display tab. Like the mode it applies at once through `/api/theme`, and Save keeps it as `theme` in the config. An unknown theme in a stored config or backup loads as `none` rather than failing the document.
 
-`snow` is the Christmas theme: 22 flakes, 8 near and 14 far. Near flakes fall at 8-12 px/s and sway 1.5 px either side; far ones fall at 3.5-6 px/s, sway less and are drawn at under half the brightness, which reads as depth. Positions are floats moved by the real time between frames, so the snow falls at the same pace whatever frame rate the mode runs at - the tickers run at their scroll speed, the chart at 30 fps.
+`snow` is the Christmas theme: 22 flakes, 8 near and 14 far. Near flakes fall at 4-6 px/s, drift up to 1 px/s sideways and sway 2-3.5 px either side; far ones fall at 2-3.5 px/s, drift and sway less, and are drawn at under half the brightness, which reads as depth. Each flake gets its own speed, drift and sway when it spawns. Positions are floats moved by the real time between frames, so the snow falls at the same pace whatever frame rate the mode runs at - the tickers run at their scroll speed, the chart at 30 fps.
 
-Every feed screen clears through `clearFrame()`, which draws the snow straight after the clear and before anything else. That puts it behind the content: flakes show between the letters and pass behind the chart's fill, and never cover a figure. The setup, splash and test screens clear for themselves and never show it.
+Every feed screen clears through `clearFrame()`, which draws the snow straight after the clear and before anything else. That puts it behind the content: flakes show between the letters and never cover a figure. The setup, splash and test screens clear for themselves and never show it.
 
-The chart is normally redrawn only when something changes. With a theme on it joins the tickers as an animated screen at 30 fps. Measured with snow, a frame takes about 2 ms on the chart, 1.1 ms on the horizontal ticker and 1.8 ms on the vertical one (`tickerDrawUs` in `/api/status`).
+On the chart screen the near flakes settle on the chart; the far ones carry on and pass behind its fill. `chartColumns()` works out the chart's top edge per column before the frame is cleared and hands it to the snow, so the same numbers draw the chart and decide where snow lands:
+
+- A near flake lands when it reaches the row above the ground - the chart's top edge less any snow already there. Only within a couple of rows of it: a flake already well below, placed there when the theme came on or overtaken by a chart that rose past it, is behind the chart and keeps falling.
+- It rolls downhill first. While a neighbouring column's ground is two or more rows lower it moves there, so snow gathers in the chart's dips instead of balancing on its peaks.
+- A column holds at most 3 px of snow and never piles into the header rows; a flake with nowhere to go melts on arrival.
+- One pixel melts from a random column every 2.5 s, so a feed left up for a long time keeps a dusting rather than filling in.
+- Each feed's chart starts with bare ground. The snow was lying on a chart that is no longer there.
+
+The chart is normally redrawn only when something changes. With a theme on it joins the tickers as an animated screen at 30 fps. Measured with snow, a frame takes about 2.6 ms on the chart with landing, 1.1 ms on the horizontal ticker and 1.8 ms on the vertical one (`tickerDrawUs` in `/api/status`).
 
 Adding the snow changed how GCC inlined `drawChart`, and the Xtensa compiler then failed with an internal compiler error (`insn does not satisfy its constraints`) on a float `?:` in the chart's scaling. That check is now an `if` outside the loop and `drawChart` is `noinline`. If the same error appears after some other change, look for a float conditional in a function that has just started being inlined.
 
