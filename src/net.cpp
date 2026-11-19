@@ -212,6 +212,13 @@ static void handleTheme()
   sendOk();
 }
 
+// Santa flies every few minutes on his own; this is for not having to wait.
+static void handleSanta()
+{
+  displaySantaNow();
+  sendOk();
+}
+
 static void handleMode()
 {
   if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
@@ -672,6 +679,7 @@ void netBegin()
   http.on("/api/pause",      HTTP_POST, handlePause);
   http.on("/api/mode",       HTTP_POST, handleMode);
   http.on("/api/theme",      HTTP_POST, handleTheme);
+  http.on("/api/santa",      HTTP_POST, handleSanta);
   http.on("/api/defaults",   HTTP_POST, handleDefaults);
   http.on("/api/apikey",     HTTP_POST, handleApiKey);
   http.on("/api/fetch",      HTTP_POST, handleFetch);

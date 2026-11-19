@@ -155,6 +155,11 @@
         <option value="none">none</option>
         <option value="snow">christmas - falling snow</option>
       </select>
+      <div class="forSnow">
+        <div style="height:8px"></div>
+        <button onclick="santaNow()">send Santa now</button>
+        <p class="hint">Santa flies across every two to five minutes while it snows, the first time shortly after the theme comes on.</p>
+      </div>
 
       <div class="forTicker">
         <label>Scroll speed <span id="spdVal"></span></label>
@@ -363,6 +368,7 @@ async function loadConfig() {
   $('mode').value        = cfg.mode === 'multi_price' ? 'ticker_vertical' : cfg.mode;
   if (!$('mode').value) $('mode').value = 'single_chart';
   $('theme').value       = cfg.theme === 'snow' ? 'snow' : 'none';
+  themeControls();
   modeControls();
   $('dwellSec').value    = cfg.dwellSec;
   $('scrollSpeed').value = cfg.scrollSpeed || 20;
@@ -760,9 +766,20 @@ function liveMode() {
 
 // Same as the mode: live on the panel at once, kept by Save.
 function liveTheme() {
+  themeControls();
   dirty();
   fetch('/api/theme', { method:'POST', body: JSON.stringify({ theme: $('theme').value }) })
     .then(r => { if (!r.ok) toast('could not switch theme', true); });
+}
+
+function themeControls() {
+  document.querySelectorAll('.forSnow')
+          .forEach(el => el.classList.toggle('hide', $('theme').value !== 'snow'));
+}
+
+function santaNow() {
+  fetch('/api/santa', { method:'POST' })
+    .then(r => toast(r.ok ? 'here he comes' : 'could not reach the panel', !r.ok));
 }
 
 function modeControls() {

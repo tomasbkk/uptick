@@ -3,7 +3,7 @@
 #include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.23.1"
+#define UPTICK_VERSION   "0.24.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 
@@ -163,6 +163,10 @@ void displayTask(void* arg);        // pinned to core 1
 // needs protecting - it is a circular DMA chain in internal RAM and runs
 // through flash writes untouched - but config.cpp still uses this to swap the
 // config and the quotes without a frame landing in between.
+// Sends Santa across the panel on the next frame, if the snow theme is on.
+// Otherwise he flies whenever it next is, a few minutes after it comes on.
+void displaySantaNow();
+
 void displayPause();
 void displayResume();
 

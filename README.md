@@ -141,6 +141,8 @@ Power save used to be applied only when WiFi joined, so saving a change to it di
 | POST | `/api/speed` | live scroll speed for both tickers, not persisted |
 | POST | `/api/pause` | live vertical-ticker pause, not persisted |
 | POST | `/api/mode` | live display mode, not persisted; the web page's mode picker uses it, so a mode applies as soon as it is chosen |
+| POST | `/api/theme` | live theme, `none` or `snow`, not persisted - the same arrangement as the mode |
+| POST | `/api/santa` | send Santa across on the next frame, while the snow theme is on |
 | GET / POST | `/api/palette` | live colour overrides by name, not persisted - the config's `palette` is what persists |
 | POST | `/api/defaults` | restore factory settings and colours, leaving WiFi alone |
 | POST | `/api/apikey` | store the CoinGecko key (write-only) |
@@ -315,6 +317,10 @@ On the chart screen the near flakes settle on the chart; the far ones carry on a
 - A column holds at most 3 px of snow and never piles into the header rows; a flake with nowhere to go melts on arrival.
 - One pixel melts from a random column every 2.5 s, so a feed left up for a long time keeps a dusting rather than filling in.
 - Each feed's chart starts with bare ground. The snow was lying on a chart that is no longer there.
+
+Santa flies across every two to five minutes while it snows, the first time 20-40 s after the theme comes on so that turning it on shows him rather than leaving it to chance. "send Santa now" on the Display tab, or `POST /api/santa`, sends him on the next frame. He is a 34x11 sprite - Santa in a sleigh behind two reindeer, Rudolph's red nose in front - stored as rows of characters, one per pixel, with the colors in `santaColor()` rather than the palette, the same as the boot logo. Two frames swapped four times a second make the reindeer gallop. Each flight picks a direction, mirroring the sprite so the reindeer always lead, and a height, and bobs a pixel either way; he crosses at 12 px/s, about 8 s.
+
+Unlike the snow he is drawn over everything, after the screen's own content. He is up for a few seconds at a time, and behind the figures he would be mostly hidden. He adds about 0.2 ms to a frame.
 
 The chart is normally redrawn only when something changes. With a theme on it joins the tickers as an animated screen at 30 fps. Measured with snow, a frame takes about 2.6 ms on the chart with landing, 1.1 ms on the horizontal ticker and 1.8 ms on the vertical one (`tickerDrawUs` in `/api/status`).
 

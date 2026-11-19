@@ -617,6 +617,8 @@ static void flakeSpawn(Flake& f, bool anywhere)
   f.phase = rnd(0, 6.2832f);
 }
 
+static void santaReset();   // below, with the rest of Santa
+
 static void snowReset()
 {
   s_rng ^= esp_random() | 1;
@@ -627,6 +629,7 @@ static void snowReset()
   }
   memset(s_pile, 0, sizeof(s_pile));
   s_surfKey    = nullptr;
+  santaReset();
   s_meltAcc    = 0;
   s_snowLastUs = micros();
   s_snowReady  = true;
@@ -765,6 +768,138 @@ static void clearFrame()
   matrix->fillScreen(0);
   if (s_snowOn) drawSnow();
   s_surf = nullptr;                      // only good for the frame that set it
+}
+
+// ---------------------------------------------------------------- santa
+
+// Santa in his sleigh behind two reindeer, Rudolph leading, flying across the
+// panel every few minutes while it snows. Unlike the snow he is drawn over
+// everything, after the screen's own content: he is up for a few seconds at a
+// time, and behind the figures he would be mostly hidden.
+//
+// Drawn facing right, and mirrored when he flies left so the reindeer always
+// lead. Two frames, swapped four times a second, make the reindeer gallop.
+// One character per pixel; '.' is transparent. The colors are the
+// character's own, not palette entries, the same as the boot logo.
+static const int16_t SANTA_W = 34;
+static const int16_t SANTA_H = 11;
+
+static const char* const SANTA[2][SANTA_H] = {
+  {   // legs out
+    "....WRR...........................",
+    ".....RRRR............A.A......A.A.",
+    ".....WWWW.............AA.......AA.",
+    "DD...WSSS.............BBB......BBN",
+    "DD...WWWW.......BBBBBBB..BBBBBBB..",
+    "DD..RRRRRRGGGGGGBBBBBBGGGBBBBBB...",
+    "DYYYYYYYYYYYY.Y.B....B...B....B...",
+    "DDDDDDDDDDDDDY.B......B.B......B..",
+    ".DDDDDDDDDDDD.....................",
+    "..Y.......Y...Y...................",
+    "YYYYYYYYYYYYYY....................",
+  },
+  {   // legs under
+    "....WRR...........................",
+    ".....RRRR............A.A......A.A.",
+    ".....WWWW.............AA.......AA.",
+    "DD...WSSS.............BBB......BBN",
+    "DD...WWWW.......BBBBBBB..BBBBBBB..",
+    "DD..RRRRRRGGGGGGBBBBBBGGGBBBBBB...",
+    "DYYYYYYYYYYYY.Y..B..B.....B..B....",
+    "DDDDDDDDDDDDDY....B.B......B.B....",
+    ".DDDDDDDDDDDD.....................",
+    "..Y.......Y...Y...................",
+    "YYYYYYYYYYYYYY....................",
+  },
+};
+
+static uint16_t santaColor(char c)
+{
+  switch (c)
+  {
+    case 'R': return col(230,  20,  20);   // suit and hat
+    case 'D': return col(140,   0,   0);   // sleigh, darker so Santa stands out
+    case 'W': return col(255, 255, 255);   // fur trim and beard
+    case 'S': return col(255, 170, 120);   // face
+    case 'Y': return col(255, 200,   0);   // sleigh rim and runners
+    case 'G': return col(200, 160,  40);   // reins
+    case 'B': return col(150,  80,  30);   // reindeer
+    case 'A': return col(210, 170, 110);   // antlers
+    case 'N': return col(255,   0,   0);   // Rudolph's nose
+  }
+  return 0;
+}
+
+static const float SANTA_PPS = 12.0f;      // pixels per second; about 8 s to cross
+
+static bool          s_santaUp    = false;
+static bool          s_santaLeft  = false; // flying right to left
+static int16_t       s_santaY     = 0;
+static uint32_t      s_santaStart = 0;
+static uint32_t      s_santaDue   = 0;
+static volatile bool s_santaKick  = false; // from the web page's button
+
+// First flight soon after the theme comes on, so turning it on shows him
+// rather than leaving it to chance; after that every two to five minutes.
+static void santaSchedule(bool first)
+{
+  const float sec = first ? rnd(20, 40) : rnd(120, 300);
+  s_santaDue = millis() + (uint32_t)(sec * 1000.0f);
+}
+
+static void santaReset()
+{
+  s_santaUp = false;
+  santaSchedule(true);
+}
+
+void displaySantaNow() { s_santaKick = true; }
+
+static void drawSanta()
+{
+  const uint32_t now = millis();
+
+  if (!s_santaUp)
+  {
+    if (!s_santaKick && (int32_t)(now - s_santaDue) < 0) return;
+    s_santaKick  = false;
+    s_santaUp    = true;
+    s_santaLeft  = rnd(0, 1) < 0.5f;
+    s_santaY     = (int16_t)rnd(1, PANEL_H - SANTA_H - 1);
+    s_santaStart = now;
+  }
+
+  // Position from the time since take-off, so the frame rate of the mode he
+  // is flying over does not change his speed.
+  const float   t      = (now - s_santaStart) / 1000.0f;
+  const int16_t travel = (int16_t)(t * SANTA_PPS);
+  if (travel > PANEL_W + SANTA_W)
+  {
+    s_santaUp = false;
+    santaSchedule(false);
+    return;
+  }
+
+  int16_t left = travel - SANTA_W;                     // entering from the left
+  if (s_santaLeft) left = PANEL_W - travel;            // entering from the right
+
+  const int16_t top   = s_santaY + (int16_t)lroundf(sinf(t * 3.0f));   // a gentle bob
+  const uint8_t frame = (uint8_t)(t * 4.0f) & 1;
+
+  for (int16_t r = 0; r < SANTA_H; r++)
+  {
+    const int16_t y = top + r;
+    if (y < 0 || y >= PANEL_H) continue;
+    const char* row = SANTA[frame][r];
+    for (int16_t c = 0; c < SANTA_W; c++)
+    {
+      const char ch = row[s_santaLeft ? SANTA_W - 1 - c : c];
+      if (ch == '.') continue;
+      const int16_t x = left + c;
+      if (x < 0 || x >= PANEL_W) continue;
+      matrix->drawPixel(x, y, santaColor(ch));
+    }
+  }
 }
 
 // ---------------------------------------------------------------- screens
@@ -1433,6 +1568,7 @@ void displayTask(void* arg)
       else if (anim == ANIM_VERTICAL) drawVertical(cfg);
       else if (!q.valid)              drawWaiting(cfg.feeds[feedIdx]);
       else                            drawSingleChart(cfg, cfg.feeds[feedIdx], q, stale);
+      if (snow) drawSanta();          // over the content, unlike the snow
       s_tickerUs = micros() - t0;
       flip();
       xSemaphoreGive(s_panelMutex);
