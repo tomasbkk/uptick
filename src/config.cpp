@@ -18,6 +18,7 @@ void configDefaults(Config& c)
   // refresh stability, and the ~40 mA it saves is irrelevant on mains power.
   c.wifiSleep  = false;
   c.mode         = "single_chart";
+  c.theme        = "none";
   c.dwellSec   = 15;
   c.scrollSpeed = SCROLL_PPS_DEFAULT;
   c.pauseSec    = PAUSE_SEC_DEFAULT;
@@ -141,6 +142,7 @@ String configToJson()
     d["rotate180"]  = g_cfg.rotate180;
     d["wifiSleep"]  = g_cfg.wifiSleep;
     d["mode"]         = g_cfg.mode;
+    d["theme"]        = g_cfg.theme;
     d["dwellSec"]   = g_cfg.dwellSec;
     d["scrollSpeed"] = g_cfg.scrollSpeed;
     d["pauseSec"]    = g_cfg.pauseSec;
@@ -177,6 +179,10 @@ bool configFromJson(const String& body, String& err)
   c.rotate180  = d["rotate180"] | false;
   c.wifiSleep  = d["wifiSleep"] | false;
   c.mode         = d["mode"]         | "single_chart";
+  // An unknown theme falls back to none rather than failing the document - a
+  // backup from a later version that has more themes should still restore.
+  c.theme        = d["theme"]        | "none";
+  if (c.theme != "snow") c.theme = "none";
   c.dwellSec   = constrain((int)(d["dwellSec"]   | 15), 3, 3600);
   c.scrollSpeed = constrain((int)(d["scrollSpeed"] | SCROLL_PPS_DEFAULT), SCROLL_PPS_MIN, SCROLL_PPS_MAX);
   c.pauseSec    = constrain((int)(d["pauseSec"] | PAUSE_SEC_DEFAULT), 0, PAUSE_SEC_MAX);

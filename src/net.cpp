@@ -193,6 +193,25 @@ static void handleFiles()
 // Flipping between the test screens and the real one while tuning colours
 // should not write flash on every click, and a reset should land you back on
 // whatever mode you actually saved.
+// Live, like the mode: applies to the panel at once, and Save keeps it.
+static void handleTheme()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  const String t = d["theme"] | "";
+  if (t != "none" && t != "snow") { sendErr(400, "unknown theme"); return; }
+
+  {
+    CfgLock lk;
+    g_cfg.theme = t;
+    g_cfgRev++;
+  }
+  sendOk();
+}
+
 static void handleMode()
 {
   if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
@@ -652,6 +671,7 @@ void netBegin()
   http.on("/api/speed",      HTTP_POST, handleSpeed);
   http.on("/api/pause",      HTTP_POST, handlePause);
   http.on("/api/mode",       HTTP_POST, handleMode);
+  http.on("/api/theme",      HTTP_POST, handleTheme);
   http.on("/api/defaults",   HTTP_POST, handleDefaults);
   http.on("/api/apikey",     HTTP_POST, handleApiKey);
   http.on("/api/fetch",      HTTP_POST, handleFetch);

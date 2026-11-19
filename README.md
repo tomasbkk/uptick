@@ -300,6 +300,18 @@ Unlike the horizontal tape, entries are drawn live every frame rather than froze
 
 A list of one or two fits the panel as it is and does not move.
 
+### Themes
+
+A theme is an animated layer behind the feeds, picked on the Display tab. Like the mode it applies at once through `/api/theme`, and Save keeps it as `theme` in the config. An unknown theme in a stored config or backup loads as `none` rather than failing the document.
+
+`snow` is the Christmas theme: 22 flakes, 8 near and 14 far. Near flakes fall at 8-12 px/s and sway 1.5 px either side; far ones fall at 3.5-6 px/s, sway less and are drawn at under half the brightness, which reads as depth. Positions are floats moved by the real time between frames, so the snow falls at the same pace whatever frame rate the mode runs at - the tickers run at their scroll speed, the chart at 30 fps.
+
+Every feed screen clears through `clearFrame()`, which draws the snow straight after the clear and before anything else. That puts it behind the content: flakes show between the letters and pass behind the chart's fill, and never cover a figure. The setup, splash and test screens clear for themselves and never show it.
+
+The chart is normally redrawn only when something changes. With a theme on it joins the tickers as an animated screen at 30 fps. Measured with snow, a frame takes about 2 ms on the chart, 1.1 ms on the horizontal ticker and 1.8 ms on the vertical one (`tickerDrawUs` in `/api/status`).
+
+Adding the snow changed how GCC inlined `drawChart`, and the Xtensa compiler then failed with an internal compiler error (`insn does not satisfy its constraints`) on a float `?:` in the chart's scaling. That check is now an `if` outside the loop and `drawChart` is `noinline`. If the same error appears after some other change, look for a float conditional in a function that has just started being inlined.
+
 ### The percentage is always 24h
 
 The chart span is per-feed and adjustable; the percentage is always the fixed 24 hour change, so it stays comparable between feeds whose charts cover different spans. The two disagree routinely - a coin can be flat over a day and up 8% over a 64 hour chart - so the percentage is tinted by the percentage and the chart by the chart. Colouring a visibly falling line green to match a positive 24h figure would be a lie.
@@ -329,7 +341,7 @@ The state is worked out at draw time, so the icon changes when the session does,
 
 ### Palette
 
-Fifteen named colours, all overridable live through `/api/palette` and the web UI's colour pickers: `LABEL`, `PRICE`, `PCT_UP`, `PCT_DOWN`, `FILL_UP`, `TRACE_UP`, `FILL_DOWN`, `TRACE_DOWN`, `DIM`, `ACCENT`, `STALE`, `DIVIDER`, `SUN`, `MOON`, `CLOSED`. `DIVIDER` is the line between the horizontal ticker's sections; set to black it disappears. The last three are the market-hours icons.
+Sixteen named colors, all overridable live through `/api/palette` and the web UI's color pickers: `LABEL`, `PRICE`, `PCT_UP`, `PCT_DOWN`, `FILL_UP`, `TRACE_UP`, `FILL_DOWN`, `TRACE_DOWN`, `DIM`, `ACCENT`, `STALE`, `DIVIDER`, `SUN`, `MOON`, `CLOSED`, `SNOW`. `DIVIDER` is the line between the horizontal ticker's sections; set to black it disappears. `SUN`, `MOON` and `CLOSED` are the market-hours icons, and `SNOW` is the snow theme's near flakes - the far ones are the same color at 45%.
 
 A picker applies its colour at once through `/api/palette`, which is RAM only, and raises the page's save bar; Save stores the palette in the config with everything else. Only the colours that differ from factory are stored, by name, so a colour nobody changed follows the factory set if that is ever retuned - and a config with no `palette` at all means factory, so what is on flash always says exactly what the panel shows. Unknown names and malformed colours are skipped rather than refused. Reset to factory, and Restore default settings, both bring the factory set back.
 

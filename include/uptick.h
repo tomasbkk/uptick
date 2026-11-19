@@ -3,7 +3,7 @@
 #include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.22.2"
+#define UPTICK_VERSION   "0.23.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 
@@ -28,6 +28,7 @@ struct Config
   bool     rotate180;
   bool     wifiSleep;    // radio power save; off measurably steadies the panel
   String   mode;         // "single_chart" | "ticker" | "ticker_vertical"
+  String   theme;        // "none" | "snow"; an animated layer behind the feeds
   uint16_t dwellSec;     // seconds per feed when cycling
   uint8_t  scrollSpeed;  // both tickers, pixels per second
   uint8_t  pauseSec;     // vertical ticker: hold at each entry, 0 = continuous

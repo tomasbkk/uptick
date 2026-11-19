@@ -150,6 +150,12 @@
         <option value="ticker_vertical">ticker - vertical scroll</option>
       </select>
 
+      <label>Theme</label>
+      <select id="theme" onchange="liveTheme()">
+        <option value="none">none</option>
+        <option value="snow">christmas - falling snow</option>
+      </select>
+
       <div class="forTicker">
         <label>Scroll speed <span id="spdVal"></span></label>
         <input type="range" id="scrollSpeed" min="10" max="60" oninput="liveSpeed()">
@@ -159,7 +165,7 @@
         <input type="range" id="pauseSec" min="0" max="10" oninput="livePause()">
         <p class="hint">0 scrolls continuously. Above 0 the list holds each time an entry reaches the top, then rises one - easier to read, since vertical motion moves every character at once.</p>
       </div>
-      <p class="hint">Mode and the sliders apply to the panel straight away - save to keep them across a restart.</p>
+      <p class="hint">Mode, theme and the sliders apply to the panel straight away - save to keep them across a restart. Snow falls behind the figures in every mode; its color is SNOW in the palette.</p>
 
       <div class="forChart">
         <label>Seconds per feed</label>
@@ -356,6 +362,7 @@ async function loadConfig() {
   $('briVal').textContent = cfg.brightness + '%';
   $('mode').value        = cfg.mode === 'multi_price' ? 'ticker_vertical' : cfg.mode;
   if (!$('mode').value) $('mode').value = 'single_chart';
+  $('theme').value       = cfg.theme === 'snow' ? 'snow' : 'none';
   modeControls();
   $('dwellSec').value    = cfg.dwellSec;
   $('scrollSpeed').value = cfg.scrollSpeed || 20;
@@ -751,6 +758,13 @@ function liveMode() {
     .then(r => { if (!r.ok) toast('could not switch mode', true); });
 }
 
+// Same as the mode: live on the panel at once, kept by Save.
+function liveTheme() {
+  dirty();
+  fetch('/api/theme', { method:'POST', body: JSON.stringify({ theme: $('theme').value }) })
+    .then(r => { if (!r.ok) toast('could not switch theme', true); });
+}
+
 function modeControls() {
   const m = $('mode').value;
   const show = (cls, on) => document.querySelectorAll('.' + cls)
@@ -788,6 +802,7 @@ function liveSpeed() {
 async function saveConfig() {
   cfg.brightness = +$('brightness').value;
   cfg.mode         = $('mode').value;
+  cfg.theme        = $('theme').value;
   cfg.dwellSec   = +$('dwellSec').value;
   cfg.scrollSpeed = +$('scrollSpeed').value;
   cfg.pauseSec   = +$('pauseSec').value;
@@ -836,7 +851,7 @@ async function saveConfig() {
 const PAL_KEYS = ['LABEL','PRICE','PCT_UP','PCT_DOWN',
                   'FILL_UP','TRACE_UP','FILL_DOWN','TRACE_DOWN',
                   'DIM','ACCENT','STALE','DIVIDER',
-                  'SUN','MOON','CLOSED'];
+                  'SUN','MOON','CLOSED','SNOW'];
 const PAL_DESC = {
   LABEL:      'symbol, top left',
   PRICE:      'price line',
@@ -852,7 +867,8 @@ const PAL_DESC = {
   DIVIDER:    'ticker section line, black hides it',
   SUN:        'pre-market icon',
   MOON:       'after-hours icon',
-  CLOSED:     'market-closed icon'
+  CLOSED:     'market-closed icon',
+  SNOW:       'snowflakes; far ones are a dimmer shade'
 };
 
 let palette = {};
@@ -1005,7 +1021,7 @@ async function forget() {
 // Everything Save stores. Editing any of it - here or in any feed row, rows
 // added later included - raises the save bar. Live-only controls (palette,
 // panel test screens, fetching, the API key with its own button) do not.
-const PERSISTED = ['brightness', 'mode', 'scrollSpeed', 'pauseSec', 'dwellSec',
+const PERSISTED = ['brightness', 'mode', 'theme', 'scrollSpeed', 'pauseSec', 'dwellSec',
                    'refreshSec', 'rotate180', 'wifiSleepCfg'];
 
 function onEdit(e) {

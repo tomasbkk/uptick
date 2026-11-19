@@ -154,7 +154,7 @@ enum PalIdx {
   P_LABEL, P_PRICE, P_PCT_UP, P_PCT_DOWN,
   P_FILL_UP, P_TRACE_UP, P_FILL_DOWN, P_TRACE_DOWN,
   P_DIM, P_ACCENT, P_STALE, P_DIVIDER,
-  P_SUN, P_MOON, P_CLOSED,
+  P_SUN, P_MOON, P_CLOSED, P_SNOW,
   P_COUNT
 };
 
@@ -162,7 +162,7 @@ static const char* const PAL_NAMES[P_COUNT] = {
   "LABEL", "PRICE", "PCT_UP", "PCT_DOWN",
   "FILL_UP", "TRACE_UP", "FILL_DOWN", "TRACE_DOWN",
   "DIM", "ACCENT", "STALE", "DIVIDER",
-  "SUN", "MOON", "CLOSED"
+  "SUN", "MOON", "CLOSED", "SNOW"
 };
 
 // Tuned on the panel with the palette pickers and exported from the web page.
@@ -182,6 +182,7 @@ static const Rgb PAL_FACTORY[P_COUNT] = {
   { 255, 170,   0 },   // SUN        - pre-market icon
   { 150, 170, 255 },   // MOON       - after-hours icon
   { 140, 140, 150 },   // CLOSED     - market-closed icon
+  { 200, 220, 255 },   // SNOW       - near snowflakes; far ones are a dimmer shade
 };
 
 // Starts at factory before anything else runs. The stored config is loaded -
@@ -241,6 +242,7 @@ static uint16_t C_DIVIDER()    { return P(P_DIVIDER);    }
 static uint16_t C_SUN()        { return P(P_SUN);        }
 static uint16_t C_MOON()       { return P(P_MOON);       }
 static uint16_t C_CLOSED()     { return P(P_CLOSED);     }
+static uint16_t C_SNOW()       { return P(P_SNOW);       }
 
 // ---------------------------------------------------------------- text
 
@@ -465,12 +467,27 @@ static void drawMarketIcon(int16_t yTop, uint8_t state)
 // ---------------------------------------------------------------- chart
 
 // Solid fill in the trend colour, under a lighter trace along its top edge.
-static void drawChart(const Quote& q, int16_t yTop, int16_t yBot,
-                      uint16_t fill, uint16_t trace)
+//
+// noinline, and the flat-window check is an if outside the loop rather than a
+// ?: inside it: inlined into drawSingleChart, that conditional float made the
+// Xtensa GCC fail with an internal compiler error ("insn does not satisfy its
+// constraints"), and which caller it was inlined into decided whether it did.
+static void __attribute__((noinline)) drawChart(const Quote& q, int16_t yTop, int16_t yBot,
+                                                uint16_t fill, uint16_t trace)
 {
   if (q.count < 2) return;
 
   const int16_t span = yBot - yTop;
+
+  // Scale to the visible window, never to zero, or intraday moves render as a
+  // flat line across the bottom. A window with no range at all sits at mid
+  // height instead.
+  float scale = 0.0f, base = 0.5f;
+  if (q.hi > q.lo)
+  {
+    scale = 1.0f / (q.hi - q.lo);
+    base  = 0.0f;
+  }
 
   int16_t colY[PANEL_W];
   for (int16_t x = 0; x < PANEL_W; x++)
@@ -484,9 +501,7 @@ static void drawChart(const Quote& q, int16_t yTop, int16_t yBot,
     float v = (i + 1 < q.count) ? q.points[i] + (q.points[i + 1] - q.points[i]) * frac
                                 : q.points[q.count - 1];
 
-    // Scale to the visible window, never to zero, or intraday moves render as
-    // a flat line across the bottom.
-    float norm = (q.hi > q.lo) ? (v - q.lo) / (q.hi - q.lo) : 0.5f;
+    const float norm = base + (v - q.lo) * scale;
     colY[x] = yBot - (int16_t)lroundf(norm * span);
   }
 
@@ -513,6 +528,130 @@ static void drawChart(const Quote& q, int16_t yTop, int16_t yBot,
     else if (colY[x] > colY[x - 1])
       matrix->drawLine(x - 1, colY[x - 1], x - 1, colY[x], trace);
   }
+}
+
+// ---------------------------------------------------------------- themes
+
+// Falling snow, the Christmas theme. It is drawn straight after the frame is
+// cleared and before anything else, so it falls behind the content: flakes
+// show between the letters and disappear behind the chart, and never cover a
+// figure.
+//
+// Two layers give it depth. Near flakes are brighter, fall faster and sway
+// wider; far ones are a dimmer shade of the same color and slower. Positions
+// are floats moved by the real time since the last frame rather than a fixed
+// step per frame - the tickers run at whatever frame rate their scroll speed
+// sets, and the snow has to fall at the same pace in every mode.
+struct Flake
+{
+  float   x, y;     // pixels; y below the panel means it is due a respawn
+  float   vy;       // fall speed, pixels per second
+  float   phase;    // position in its sideways sway, radians
+  float   rate;     // sway speed, radians per second
+  float   amp;      // sway width, pixels either side
+  bool    near;
+};
+
+static const uint8_t SNOW_NEAR = 8;
+static const uint8_t SNOW_FAR  = 14;
+static const uint8_t SNOW_FPS  = 30;     // chart mode's frame rate while it snows
+
+static Flake    s_snow[SNOW_NEAR + SNOW_FAR];
+static bool     s_snowOn     = false;    // set by the task from cfg.theme every pass
+static bool     s_snowReady  = false;    // flakes placed since the theme came on
+static uint32_t s_snowLastUs = 0;
+
+// xorshift32. The flakes need nothing better than "looks random".
+static uint32_t s_rng = 0x9E3779B9;
+
+static float rnd(float lo, float hi)
+{
+  s_rng ^= s_rng << 13;
+  s_rng ^= s_rng >> 17;
+  s_rng ^= s_rng << 5;
+  return lo + (hi - lo) * (float)(s_rng & 0xFFFF) / 65535.0f;
+}
+
+// anywhere places the flake at any height, so turning the theme on shows a
+// screen that is already snowing rather than one that fills from the top.
+static void flakeSpawn(Flake& f, bool anywhere)
+{
+  f.x = rnd(0, PANEL_W);
+  if (anywhere) f.y = rnd(-2, PANEL_H);
+  else          f.y = rnd(-4, -1);
+
+  if (f.near)
+  {
+    f.vy   = rnd(8.0f, 12.0f);
+    f.rate = 1.6f;
+    f.amp  = 1.5f;
+  }
+  else
+  {
+    f.vy   = rnd(3.5f, 6.0f);
+    f.rate = 1.1f;
+    f.amp  = 0.8f;
+  }
+  f.phase = rnd(0, 6.2832f);
+}
+
+static void snowReset()
+{
+  s_rng ^= esp_random() | 1;
+  for (uint8_t i = 0; i < SNOW_NEAR + SNOW_FAR; i++)
+  {
+    s_snow[i].near = i < SNOW_NEAR;
+    flakeSpawn(s_snow[i], true);
+  }
+  s_snowLastUs = micros();
+  s_snowReady  = true;
+}
+
+// noinline so the per-frame loop exists once rather than being copied into
+// each screen that clears through clearFrame.
+static void __attribute__((noinline)) drawSnow()
+{
+  if (!s_snowReady) snowReset();
+
+  // Capped, so a pause - a mode switch, a slow frame - does not throw every
+  // flake a screen's height in one step.
+  const uint32_t nowUs = micros();
+  float dt = (nowUs - s_snowLastUs) / 1000000.0f;
+  s_snowLastUs = nowUs;
+  if (dt > 0.1f) dt = 0.1f;
+
+  // The far layer is the same color at under half the value. The panel's
+  // gamma table makes that look a good deal dimmer than half, which is the
+  // point - it reads as distance.
+  const Rgb&     s     = s_pal[P_SNOW];
+  const uint16_t cNear = C_SNOW();
+  const uint16_t cFar  = col(s.r * 45 / 100, s.g * 45 / 100, s.b * 45 / 100);
+
+  for (Flake& f : s_snow)
+  {
+    f.y += f.vy * dt;
+    if (f.y >= PANEL_H) flakeSpawn(f, false);
+
+    // The sway advances by dt too, rather than being a sine of the uptime,
+    // which as a float loses the precision to move smoothly after a few days.
+    f.phase += f.rate * dt;
+    if (f.phase > 6.2832f) f.phase -= 6.2832f;
+
+    const float sway = sinf(f.phase) * f.amp;
+    int16_t x = (int16_t)lroundf(f.x + sway);
+    x = (int16_t)((x % PANEL_W + PANEL_W) % PANEL_W);
+    const int16_t y = (int16_t)floorf(f.y);
+    if (y >= 0) matrix->drawPixel(x, y, f.near ? cNear : cFar);
+  }
+}
+
+// Every feed screen starts here instead of a bare fillScreen, so a theme's
+// background layer goes under all of them the same way. The setup, splash and
+// test screens clear for themselves and never show it.
+static void clearFrame()
+{
+  matrix->fillScreen(0);
+  if (s_snowOn) drawSnow();
 }
 
 // ---------------------------------------------------------------- screens
@@ -568,7 +707,7 @@ static void drawJoined()
 
 static void drawWaiting(const Feed& f)
 {
-  matrix->fillScreen(0);
+  clearFrame();
   drawBig(0, 0, f.label.c_str(), C_LABEL());
   drawTiny(0, 12, "WAITING FOR", C_DIM());
   drawTiny(0, 20, "DATA", C_DIM());
@@ -665,7 +804,7 @@ static void drawQuoteHeader(const Feed& f, const Quote& q, bool stale, int16_t y
 
 static void drawSingleChart(const Config& cfg, const Feed& f, const Quote& q, bool stale)
 {
-  matrix->fillScreen(0);
+  clearFrame();
 
   // Rows 0-14: label, change and price, with the market icon for stocks.
   drawQuoteHeader(f, q, stale, 0, true, marketState(q));
@@ -850,7 +989,7 @@ static void tickerRow(const Config& cfg, TickRow& r, uint8_t first, uint8_t n, i
 
 static void drawTicker(const Config& cfg)
 {
-  matrix->fillScreen(0);
+  clearFrame();
 
   const uint8_t n = cfg.feedCount;
   if (n >= 2)
@@ -921,7 +1060,7 @@ static void drawVerticalEntry(const Config& cfg, uint8_t feed, int16_t yTop)
 
 static void drawVertical(const Config& cfg)
 {
-  matrix->fillScreen(0);
+  clearFrame();
 
   const uint8_t n = cfg.feedCount;
   if (!n) return;
@@ -1027,7 +1166,7 @@ bool displayBegin()
   return true;
 }
 
-enum : uint8_t { ANIM_NONE, ANIM_HORIZONTAL, ANIM_VERTICAL };
+enum : uint8_t { ANIM_NONE, ANIM_HORIZONTAL, ANIM_VERTICAL, ANIM_CHART };
 
 void displayTask(void* arg)
 {
@@ -1117,12 +1256,13 @@ void displayTask(void* arg)
       q = g_quotes[feedIdx];
     }
 
-    // Nothing on this panel animates. Content changes when a quote lands, when
-    // the feed cycles, or when a setting moves - otherwise the frame is
-    // identical to the last one. Redrawing it 30 times a second meant 30
-    // bitplane rebuilds and 30 DMA buffer swaps per second, each one a chance
-    // to glitch the refresh; gating on an actual change makes that twice a
-    // minute instead.
+    // The static screens - the chart with no theme, the setup and info screens -
+    // change only when a quote lands, when the feed cycles, or when a setting
+    // moves; otherwise the frame is identical to the last one. Redrawing it 30
+    // times a second meant 30 bitplane rebuilds and 30 DMA buffer swaps per
+    // second, each one a chance to glitch the refresh; gating on an actual
+    // change makes that twice a minute instead. The animated screens below
+    // skip this.
     FrameKey key;
     memset(&key, 0, sizeof(key));
     key.cfgRev    = g_cfgRev;
@@ -1139,13 +1279,21 @@ void displayTask(void* arg)
     key.stale    = stale    ? 1 : 0;
     key.showInfo = showInfo ? 1 : 0;
 
+    // Snow restarts from a fresh, already-falling screen each time the theme
+    // is turned on, rather than resuming wherever it was left.
+    const bool snow = cfg.theme == "snow";
+    if (!snow) s_snowReady = false;
+    s_snowOn = snow;
+
     // The two tickers are the screens that animate, so they run on their own
-    // clock and skip the change-gating below entirely. They stand aside for
-    // the setup and just-joined screens, which matter more.
-    const uint8_t anim = (g_net.apMode || showInfo)     ? ANIM_NONE
-                       : cfg.mode == "ticker"          ? ANIM_HORIZONTAL
-                       : cfg.mode == "ticker_vertical" ? ANIM_VERTICAL
-                                                       : ANIM_NONE;
+    // clock and skip the change-gating below entirely - and so does the chart
+    // while it snows, since the snow moves even when the chart does not. They
+    // stand aside for the setup and just-joined screens, which matter more.
+    const uint8_t anim = (g_net.apMode || showInfo)              ? ANIM_NONE
+                       : cfg.mode == "ticker"                   ? ANIM_HORIZONTAL
+                       : cfg.mode == "ticker_vertical"          ? ANIM_VERTICAL
+                       : (snow && cfg.mode == "single_chart")   ? ANIM_CHART
+                                                                : ANIM_NONE;
     if (anim != ANIM_NONE)
     {
       if (anim != lastAnim)
@@ -1153,8 +1301,8 @@ void displayTask(void* arg)
         // Start the tape afresh, and the frame clock with it -
         // vTaskDelayUntil with a stale reference would otherwise race through
         // the frames it thinks it missed.
-        if (anim == ANIM_HORIZONTAL) tickerReset();
-        else                         verticalReset(cfg);
+        if (anim == ANIM_HORIZONTAL)    tickerReset();
+        else if (anim == ANIM_VERTICAL) verticalReset(cfg);
         wake = xTaskGetTickCount();
       }
       lastAnim = anim;
@@ -1162,15 +1310,21 @@ void displayTask(void* arg)
       xSemaphoreTake(s_panelMutex, portMAX_DELAY);
       waitForFlip();
       const uint32_t t0 = micros();
-      if (anim == ANIM_HORIZONTAL) drawTicker(cfg);
-      else                         drawVertical(cfg);
+      if (anim == ANIM_HORIZONTAL)    drawTicker(cfg);
+      else if (anim == ANIM_VERTICAL) drawVertical(cfg);
+      else if (!q.valid)              drawWaiting(cfg.feeds[feedIdx]);
+      else                            drawSingleChart(cfg, cfg.feeds[feedIdx], q, stale);
       s_tickerUs = micros() - t0;
       flip();
       xSemaphoreGive(s_panelMutex);
 
-      // One pixel per frame, so the frame period is what sets the speed.
+      // The tickers move one pixel per frame, so their frame period is what
+      // sets the scroll speed. The chart has nothing to scroll and runs at a
+      // fixed rate just for the snow.
       s_stackFree = uxTaskGetStackHighWaterMark(nullptr);
-      const TickType_t period = pdMS_TO_TICKS(1000 / (cfg.scrollSpeed ? cfg.scrollSpeed : 20));
+      const uint16_t fps = (anim == ANIM_CHART) ? SNOW_FPS
+                         : (cfg.scrollSpeed ? cfg.scrollSpeed : 20);
+      const TickType_t period = pdMS_TO_TICKS(1000 / fps);
       vTaskDelayUntil(&wake, period ? period : 1);
       continue;
     }
