@@ -2111,8 +2111,11 @@ static void __attribute__((noinline)) clockAnalog(const ClockTime& ct)
 // in the style of the old platform games, not copied from any of them.
 //
 // Positions are screen columns. Everything in the world moves left at the
-// scroll speed; the plumber stays at PL_HX, far enough right that what pops
-// out of a box clears the clock in the top left.
+// scroll speed; the plumber stays in the middle, at PL_HX. The clock sits in
+// the top right: a box is hit above him and scrolls on to the left while the
+// mushroom rises out of it, so the left is where things pop up, and the right
+// of the top is clear. The clock starts at column 35, and he is 8 wide from
+// 27, so even his highest jump passes beside it.
 static const char* const PL_SMALL[2][8] = {
   { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".SSSSSSS", "..RBBR..", ".BBBBBB.", ".BB..BB.", "KK....KK" },
   { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".SSSSSSS", "..RBBR..", "..BBBB..", "..BBBB..", "..KKKK.." },
@@ -2177,7 +2180,7 @@ static void plSprite(int16_t x, int16_t y, const char* const* rows, uint8_t h)
 }
 
 static const int16_t PL_FLOOR = 28;       // first row of the ground
-static const int16_t PL_HX    = 44;       // the plumber's column
+static const int16_t PL_HX    = 27;       // the plumber's column: the middle, less half his width
 static const int16_t PL_BOX_Y = 8;
 static const float   PL_SCROLL = 20.0f;   // px per second
 static const float   PL_G      = 140.0f;  // gravity, px per second squared
@@ -2410,12 +2413,13 @@ static void __attribute__((noinline)) clockPlatformer(const ClockTime& ct)
     else     plSprite(PL_HX, top, PL_SMALL[s_plAir ? 0 : step], 8);
   }
 
-  // The time on top, outlined, so whatever scrolls behind it stays clear.
+  // The time on top, right-aligned and outlined, so whatever scrolls behind
+  // it stays clear.
   char hm[8], date[16];
   clockHM(ct, hm, sizeof(hm), true);
   clockDate(ct, date, sizeof(date), true);
-  drawOutlined(2, 1, hm, 1, col(255, 255, 255));
-  drawTinyOutlined(2, 10, date, col(150, 150, 160));
+  drawOutlined(PANEL_W - bigWidth(hm), 1, hm, 1, col(255, 255, 255));
+  drawTinyOutlined(PANEL_W - tinyWidth(date), 10, date, col(150, 150, 160));
 }
 
 // ---------------------------------------------------------------- snake
