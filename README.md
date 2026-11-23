@@ -152,7 +152,7 @@ On the **Display** tab:
 
 ### Settings
 
-- **WiFi** - power save (off is steadier), and **Forget WiFi**, which restarts the board into setup mode.
+- **WiFi** - power save (off keeps fetching steadier), and **Forget WiFi**, which restarts the board into setup mode.
 - **Market data** - **Price poll** is how often prices are fetched. **Pause fetching** stops all fetching until a restart. The **CoinGecko API key** is stored on the board and never sent back to the page.
 - **Palette** - every color on the panel, changed live and kept by Save. **reset to factory** brings back the defaults.
 - **Maintenance** - install a firmware file over WiFi (see [Updating later](#updating-later)), and **Restore default settings**, which resets feeds, layout and colors but keeps WiFi.
@@ -182,7 +182,7 @@ The panel is 2048 LEDs. Full white is roughly 3-4 A; a ticker screen is mostly d
 
 1/16 scan uses address lines A-D only, so the board's address-E jumper stays alone. The 2x10 socket accepts the 2x8 IDC cable that ships with the panel.
 
-Pin assignments live in `include/pins.h`, taken from the block Adafruit_Protomatter selects under `ARDUINO_ADAFRUIT_MATRIXPORTAL_ESP32S3` - the pins are the board's, so they carried over unchanged to the DMA driver.
+Pin assignments live in `include/pins.h`. They are the Matrix Portal S3's own HUB75 pins, as Adafruit's examples for this board define them.
 
 ## Developer notes
 
@@ -317,7 +317,7 @@ Both guards tolerate a null handle. `configBegin()` loads the stored config thro
 
 Recovering from a hang like that is worth knowing: the S3's native USB ignores the RTS reset, so `esptool` cannot auto-enter the bootloader once the app stops servicing USB, and reports `Write timeout`. Hold BOOT, tap RESET, release BOOT to enter it by hand; flash; then press RESET, because `--after hard_reset` does not work over native USB either.
 
-The web UI is read off LittleFS once at boot and served from a buffer in internal RAM. This is a correctness fix, not an optimisation - see the flicker notes below.
+The web UI is read off LittleFS once at boot and served from a buffer in internal RAM, so a page load costs no flash reads.
 
 ## Data sources
 
@@ -363,8 +363,6 @@ Yahoo needs a second scanner (`extractYahoo`). Its series sits three arrays deep
 The layout decides how data is fetched.
 
 **Single chart polls the feed on screen**, one candle request at a time, so an update lands while you are looking at it and a price moving is visible. The one exception is a feed that has no data yet - after boot, or just added - which is fetched during the previous feed's dwell, so its first turn opens on its chart rather than on "waiting for data". Once it has data it refreshes on its own turn again. The rest of the list is left alone, so effective refresh is the rotation period rather than the poll interval.
-
-Fetching only on screen once also kept every fetch at a screen transition, where a refresh glitch showed least. The DMA driver made that moot: a fetch cannot disturb the panel now.
 
 **Both tickers batch.** They show a price and a change per feed and no chart, which is what the batch endpoints return. One request per source replaces one per feed, every poll interval:
 
@@ -524,7 +522,7 @@ Brightness is the panel's output-enable duty cycle, set with `setBrightness8()`.
 
 The slider is linear - 5% means 5% duty, so a stored value keeps its meaning. No floor is needed: the driver keeps at least one pixel-clock of output per bit-plane for any non-zero value, so 1% is dim but never dark, and visibly different from 5%.
 
-This replaced colour scaling, which Protomatter forced because it had no brightness control. Scaling was the cause of every palette problem this project had: dark colours scaled below what the panel could show and rendered black (measured at 4-bit and 40%: green 220 rendered, 95 and 74 were both black), and the components did not scale in proportion, so a warm red turned orange as brightness rose. With duty-cycle brightness the palette is the palette at every level, and colours simply get brighter.
+Dimming by duty cycle keeps the palette exact at every level. The alternative, scaling every color down in software, loses dark colors below what the panel can show - measured at 4-bit and 40%, green 220 rendered while 95 and 74 went black - and shifts hues, because the components do not scale in proportion: a warm red turns orange as brightness rises.
 
 ### Colour depth and refresh
 
@@ -532,32 +530,32 @@ Depth is fixed by the build: `-DPIXEL_COLOR_DEPTH_BITS=7` in `platformio.ini`. I
 
 The gamma table also sets how dark a colour can go before it becomes black. Every palette component survives at 6 bits and above; at 4 bits, `PCT_UP`'s red (41) and `STALE`'s blue (41) both vanish.
 
-Refresh is computed by the driver from clock, depth and scan, and reported as `refreshHz` in `/api/status`. There is nothing to sample any more: with no CPU in the refresh loop, the rate cannot vary. Computed for this panel, against what Protomatter measured:
+Refresh is computed by the driver from clock, depth and scan, and reported as `refreshHz` in `/api/status`. With no CPU in the refresh loop the rate cannot vary, so there is nothing to measure. Computed for this panel at a 16 MHz clock:
 
-| Depth | 16 MHz clock | Protomatter |
-| --- | --- | --- |
-| 5 | 781 Hz | 134 Hz |
-| 6 | 422 Hz | 69 Hz |
-| **7** | **223 Hz** | - |
-| 8 | 115 Hz | - |
+| Depth | Refresh |
+| --- | --- |
+| 5 | 781 Hz |
+| 6 | 422 Hz |
+| **7** | **223 Hz** |
+| 8 | 115 Hz |
 
-7-bit at 223 Hz is the build default, and matches what the device reports. The DMA buffers, double-buffered, cost about 48 KB of internal RAM more than Protomatter did.
+7-bit at 223 Hz is the build default, and matches what the device reports. The two DMA buffers take about 55 KB of internal RAM.
 
 The S3 divides a 160 MHz source, so the driver rounds a requested clock to 10, 16 or about 23 MHz. 16 is the one where requested and real match; asking for 8 actually runs at 10, while the driver still computes refresh from 8 and under-reports by a fifth.
 
 ### Double buffering
 
-Drawing goes to a back buffer and `flipDMABuffer()` swaps. A flip only rewires the last descriptor of each chain, so the DMA moves across when it finishes the frame it is on - up to one frame after the call returns. Until then the buffer that drawing now targets is still on screen, and writing to it tears. The driver's wait for this is commented out on the S3, so `waitForFlip()` enforces it: nothing is drawn until two frame periods after a flip. The render loop sleeps far longer than that today; it exists for scrolling.
+Drawing goes to a back buffer and `flipDMABuffer()` swaps. A flip only rewires the last descriptor of each chain, so the DMA moves across when it finishes the frame it is on - up to one frame after the call returns. Until then the buffer that drawing now targets is still on screen, and writing to it tears. The driver's wait for this is commented out on the S3, so `waitForFlip()` enforces it: nothing is drawn until two frame periods after a flip. The guard is about 9 ms at 223 Hz, and the animated screens draw a frame every 11-100 ms, so it rarely has to wait.
 
-Every screen starts with `fillScreen(0)`, which matters here: the back buffer holds the frame from two flips ago, not the current one.
+Every screen starts by clearing the whole buffer, which matters here: the back buffer holds the frame from two flips ago, not the current one.
 
-## Flicker, and what it cost WiFi
+## Display driver and WiFi
 
-A HUB75 panel has no framebuffer and no PWM. One row-pair is lit at a time and greyscale comes from showing each bit-plane for a weighted duration.
+A HUB75 panel has no framebuffer and no PWM. One row-pair is lit at a time, and grayscale comes from showing each bit-plane for a weighted duration, so something has to keep shifting rows out hundreds of times a second.
 
-Protomatter needed a timer interrupt between every bit-plane - about 10,700 deadlines a second at 134 Hz and 5-bit, the tightest around 15 microseconds. Anything that delayed one showed as flicker, and a lot did: `spi_flash_read` disables the instruction cache on *both* cores, so serving the web page from LittleFS flickered the panel on every load; TLS handshakes; WiFi power save; even redrawing an unchanged frame. Each was found and worked around, and the fixes are still in place because they are good hygiene: the page is served from RAM, only the visible feed is polled, power save is off by default, and redraws are gated on a `FrameKey`.
+Here that is the ESP32-S3's LCD peripheral, through the ESP32-HUB75-MatrixPanel-DMA driver. Every bit-plane of every row, latch and output-enable timing included, is laid out as a ring of DMA descriptors in internal RAM that the peripheral walks forever. No interrupt fires and no CPU is involved, and internal RAM needs no cache, so nothing the firmware does - TLS handshakes, flash writes, serving the web page - can make the panel flicker. `displayPause()` / `displayResume()` remain only so `configFromJson` can swap the config and the quotes without a frame being drawn from one new and one old.
 
-The DMA driver removes the problem instead of working around it. Every bit-plane of every row, latch and OE timing included, is laid out as a ring of descriptors in internal RAM that the LCD peripheral walks forever. No interrupt fires and no CPU is involved, and internal RAM needs no cache, so the refresh runs straight through flash writes. `displayPause()` / `displayResume()` no longer protect the refresh; they remain only so `configFromJson` can swap the config and the quotes without a frame being drawn from one new and one old.
+An earlier version drove the panel with Adafruit_Protomatter, which needs a timer interrupt between every bit-plane, and anything that delayed one showed as flicker. Moving to the DMA driver is what ended that.
 
 ### Drive strength
 
@@ -565,13 +563,12 @@ The driver sets every HUB75 pin to the S3's maximum drive strength, level 3 (abo
 
 | Configuration | Replies | Median | Max |
 | --- | --- | --- | --- |
-| Protomatter | 30/30 | 3 ms | 6 ms |
-| DMA, 16 MHz, drive 3 (driver default) | 21/30 | 955 ms | 1935 ms |
-| DMA, 10 MHz, drive 3 | 30/30 | 16 ms | 157 ms |
-| DMA, 16 MHz, drive 1 | 40/40 | 45 ms | 407 ms |
-| **DMA, 16 MHz, drive 0** | **40/40** | **2 ms** | **6 ms** |
+| 16 MHz, drive 3 (driver default) | 21/30 | 955 ms | 1935 ms |
+| 10 MHz, drive 3 | 30/30 | 16 ms | 157 ms |
+| 16 MHz, drive 1 | 40/40 | 45 ms | 407 ms |
+| **16 MHz, drive 0** | **40/40** | **2 ms** | **6 ms** |
 
-It is RF, not bus contention. Changing edge speed at a fixed clock changed the result, which bus load would not care about - and the DMA stream is at most 32 MB/s against roughly 960 MB/s of internal RAM bandwidth. The antenna sits a few centimetres from these lines, and this driver clocks continuously, repeating each row up to 32 times a frame, where Protomatter shifted each bit-plane once and then held.
+It is RF, not bus contention. Changing edge speed at a fixed clock changed the result, which bus load would not care about - and the DMA stream is at most 32 MB/s against roughly 960 MB/s of internal RAM bandwidth. The antenna sits a few centimetres from these lines, and the driver clocks continuously, repeating each row up to 32 times a frame, so the lines are never quiet.
 
 `displayBegin()` therefore overrides every HUB75 pin to `HUB75_DRIVE` (0) after `begin()`. Too low a drive could in principle shift the wrong bit at 16 MHz, showing as speckled pixels; on this board, with the Matrix Portal plugged straight into the panel, drive 0 is clean. A board that reaches the panel over a ribbon cable may need 1, and possibly 10 MHz to get WiFi back.
 

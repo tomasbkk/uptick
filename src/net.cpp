@@ -350,11 +350,8 @@ static void handleCheck()
   sendJson(200, out);
 }
 
-// Two live switches for isolating what disturbs the panel. Neither persists.
-//
-// Fetching is the loud one: four feeds at 30 second polling means a full TLS
-// handshake roughly every 7.5 seconds. WiFi power save is the quiet one - the
-// radio wakes on every DTIM beacon whether or not anything is happening.
+// Pauses or resumes all market fetching - for troubleshooting, or to keep the
+// device off the network for a while. Not persisted; a restart resumes it.
 static void handleFetch()
 {
   if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
@@ -513,18 +510,15 @@ static void handleUpdateUpload()
 // ---------------------------------------------------------------- portal
 
 // The web UI is read off LittleFS once at boot and served from RAM thereafter.
-//
-// This is not an optimisation, it is a correctness fix for the panel. Reading
-// from LittleFS goes through spi_flash_read, which disables the instruction
-// cache on BOTH cores for the duration. Anything not resident in IRAM stalls,
-// including Protomatter's refresh ISR - so every page load visibly flickered
-// the display, even though the display runs on the other core.
+// Reading from LittleFS goes through spi_flash_read, which disables the
+// instruction cache on both cores for the duration and stalls anything not in
+// IRAM, so a page load served from flash would hold up both tasks each time.
 //
 // The buffer is forced into internal RAM. Plain malloc() hands out PSRAM for
 // an allocation this size on a board with BOARD_HAS_PSRAM, and while PSRAM
 // reads go through the cache rather than disabling it, PSRAM shares the octal
-// SPI bus with flash on this part. Internal RAM touches neither, and 14 KB out
-// of ~247 KB free is cheap for a buffer read on every page load.
+// SPI bus with flash on this part. Internal RAM touches neither, and about
+// 43 KB out of ~247 KB free is cheap for a buffer read on every page load.
 static char*  s_indexBuf = nullptr;
 static size_t s_indexLen = 0;
 

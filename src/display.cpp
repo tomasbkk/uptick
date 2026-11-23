@@ -10,10 +10,6 @@
 // descriptors that the LCD peripheral walks forever. No interrupt fires
 // between bit-planes and no CPU is involved in refresh at all, so nothing the
 // firmware does - TLS, WiFi, flash writes - can make the panel flicker.
-//
-// Protomatter, which this replaced, needed a timer interrupt between every
-// bit-plane: ~10,700 deadlines a second at 5-bit, any one of which a busy CPU
-// could miss. That is what flicker physically was.
 static MatrixPanel_I2S_DMA* matrix = nullptr;
 
 static bool              s_ok         = false;
@@ -89,13 +85,11 @@ void displayResume()
 
 // ---------------------------------------------------------------- colour
 
-// Colours go to the panel as they are. Brightness used to be a scale applied
-// to every colour before drawing, because Protomatter had no other way to dim -
-// and that was the root of two long-running problems: dark colours scaled
-// below what the panel could show and rendered black, and the components did
-// not scale in proportion, so red drifted orange as brightness rose.
+// Colors go to the panel as they are, never scaled for brightness. Scaling in
+// software loses dark colors below what the panel can show and shifts hues,
+// because the components do not scale in proportion - red drifts orange.
 //
-// Brightness is now the panel's OE duty cycle, set once by setBrightness8 and
+// Brightness is the panel's OE duty cycle, set once by setBrightness8 and
 // preserved by every draw call (they clear only the six RGB bits of each DMA
 // word; OE is bit 7). The palette is therefore the palette at every
 // brightness, and the driver's CIE 1931 table handles perceptual linearity.
@@ -1653,11 +1647,9 @@ void displayTask(void* arg)
 
     // The static screens - the chart with no theme, the setup and info screens -
     // change only when a quote lands, when the feed cycles, or when a setting
-    // moves; otherwise the frame is identical to the last one. Redrawing it 30
-    // times a second meant 30 bitplane rebuilds and 30 DMA buffer swaps per
-    // second, each one a chance to glitch the refresh; gating on an actual
-    // change makes that twice a minute instead. The animated screens below
-    // skip this.
+    // moves; otherwise the frame is identical to the last one. This key is
+    // everything that can change them, so they are redrawn only when it moves.
+    // The animated screens below skip it.
     FrameKey key;
     memset(&key, 0, sizeof(key));
     key.cfgRev    = g_cfgRev;
@@ -1733,9 +1725,8 @@ void displayTask(void* arg)
       memset(&lastKey, 0xFF, sizeof(lastKey));
     }
 
-    // Redraws are still gated on a change, but no longer to protect the
-    // refresh - a redraw cannot disturb the DMA chain now. It is simply that a
-    // static frame has no reason to be rebuilt.
+    // A static frame has no reason to be rebuilt until something in its key
+    // moves.
     if (memcmp(&key, &lastKey, sizeof(key)) != 0)
     {
       lastKey = key;

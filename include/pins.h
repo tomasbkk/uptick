@@ -3,9 +3,8 @@
 
 // HUB75 wiring for the Adafruit Matrix Portal S3.
 //
-// Verified against Adafruit_Protomatter's own example, which selects these
-// under ARDUINO_ADAFRUIT_MATRIXPORTAL_ESP32S3, and unchanged by the move to
-// the DMA driver - the pins are the board's, not the library's.
+// These are the board's own HUB75 pins, as Adafruit's examples for the Matrix
+// Portal S3 define them - they belong to the board, not to any one library.
 
 static const int8_t HUB75_R1 = 42, HUB75_G1 = 41, HUB75_B1 = 40;
 static const int8_t HUB75_R2 = 38, HUB75_G2 = 39, HUB75_B2 = 37;
@@ -44,24 +43,24 @@ static const uint32_t HUB75_CLOCK_HZ = 16000000;
 // GPIO drive strength for every HUB75 line, 0 (~5 mA) to 3 (~40 mA).
 //
 // The DMA driver sets all of them to 3, the maximum, and that wrecked WiFi:
-// measured on this board at 16 MHz, ping went from a 3 ms median on
-// Protomatter to 955 ms with 30% loss. The antenna sits a few centimetres from
-// these lines, and the sharpest possible edges put the most energy into the
-// 2.4 GHz band - and this driver clocks continuously, repeating each row up to
-// 32 times a frame, where Protomatter shifted each bit-plane once and held.
-// Softer edges keep the harmonics down without touching the clock.
+// measured on this board at 16 MHz, ping had a 955 ms median with 30% loss at
+// drive 3, against 2 ms and no loss at drive 0. The antenna sits a few
+// centimetres from these lines, and the sharpest possible edges put the most
+// energy into the 2.4 GHz band - and the driver clocks continuously, repeating
+// each row up to 32 times a frame, so the lines are never quiet. Softer edges
+// keep the harmonics down without touching the clock.
 //
 // Lower is quieter; too low and the edges get slow enough to shift the wrong
-// bit, which shows as speckled or smeared pixels. Protomatter ran at 2.
+// bit, which shows as speckled or smeared pixels. Drive 0 is clean on this
+// board with the panel plugged straight in; a ribbon cable may need 1.
 static const uint8_t HUB75_DRIVE = 0;
 
 // 5% of full OE duty. The library floors every bit-plane at one pixel-clock
 // of output, so even the bottom of the slider never goes fully dark.
 static const uint8_t PANEL_BRIGHTNESS_DEFAULT = 5;
 
-// Poll interval default, in seconds. 60 measurably steadies the panel against
-// 30 - every fetch is a TLS handshake, and a desk ticker does not need a price
-// that is fresher than a minute.
+// Poll interval default, in seconds. Every fetch is a TLS handshake, and a
+// desk ticker does not need a price fresher than a minute.
 static const uint16_t POLL_SEC_DEFAULT = 60;
 
 // Ticker scroll speed, pixels per second. The tape moves one pixel a frame,

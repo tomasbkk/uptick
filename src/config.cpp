@@ -14,8 +14,9 @@ void configDefaults(Config& c)
   c.schema     = UPTICK_SCHEMA;
   c.brightness = PANEL_BRIGHTNESS_DEFAULT;
   c.rotate180  = false;
-  // Default off: measured on this panel, power save costs a few percent of
-  // refresh stability, and the ~40 mA it saves is irrelevant on mains power.
+  // Default off: the radio stays awake rather than waking for every beacon,
+  // which keeps fetching steadier, and the ~40 mA it would save is irrelevant
+  // on mains power.
   c.wifiSleep  = false;
   c.mode         = "single_chart";
   c.theme        = "none";

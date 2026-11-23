@@ -26,7 +26,7 @@ struct Config
   uint8_t  schema;
   uint8_t  brightness;   // 1-100, applied as OE duty cycle
   bool     rotate180;
-  bool     wifiSleep;    // radio power save; off measurably steadies the panel
+  bool     wifiSleep;    // radio power save; off keeps fetching steadier
   String   mode;         // "single_chart" | "ticker" | "ticker_vertical"
   String   theme;        // "none" | "snow"; an animated layer behind the feeds
   uint16_t dwellSec;     // seconds per feed when cycling
@@ -114,8 +114,8 @@ struct QuoteLock
 
 void marketBegin();
 
-// Live kill switch for the fetcher, for isolating what disturbs the panel.
-// Not persisted - a reset resumes fetching.
+// Live switch that stops all market fetching. Not persisted - a restart
+// resumes it.
 void marketSetPaused(bool paused);
 bool marketPaused();
 
