@@ -1034,6 +1034,348 @@ static void drawDecoration(const int16_t* colY)
     }
 }
 
+// ---------------------------------------------------------------- weather
+
+// Two screens per city: now - an animated icon, the temperature, today's high
+// and low, the name and the condition - and the week, seven narrow columns of
+// day, icon, high and low. They play once after every full pass of the
+// tickers, or on their own when the tickers are switched off; see the task.
+//
+// The icon and temperature colors are the weather's own rather than palette
+// entries, the same as Santa: a sun is yellow whatever the label color is.
+
+enum : uint8_t { WX_CLEAR, WX_PARTLY, WX_CLOUDY, WX_FOG, WX_DRIZZLE, WX_RAIN, WX_SNOW, WX_THUNDER };
+
+// WMO weather codes, as Open-Meteo reports them, grouped by what to draw.
+static uint8_t wxKind(uint8_t code)
+{
+  if (code == 0)                                  return WX_CLEAR;
+  if (code <= 2)                                  return WX_PARTLY;
+  if (code == 3)                                  return WX_CLOUDY;
+  if (code == 45 || code == 48)                   return WX_FOG;
+  if (code >= 51 && code <= 57)                   return WX_DRIZZLE;
+  if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return WX_RAIN;
+  if ((code >= 71 && code <= 77) || code == 85 || code == 86)   return WX_SNOW;
+  if (code >= 95)                                 return WX_THUNDER;
+  return WX_CLOUDY;
+}
+
+// The words under the name on the now screen. The small font fits 16
+// characters across the panel, which every one of these does.
+static const char* wxText(uint8_t code)
+{
+  switch (code)
+  {
+    case 0:  return "CLEAR";
+    case 1:  return "MAINLY CLEAR";
+    case 2:  return "PARTLY CLOUDY";
+    case 3:  return "OVERCAST";
+    case 45: case 48: return "FOG";
+    case 51: case 53: case 55: return "DRIZZLE";
+    case 56: case 57: return "FREEZING DRIZZLE";
+    case 61: case 63: return "RAIN";
+    case 65: return "HEAVY RAIN";
+    case 66: case 67: return "FREEZING RAIN";
+    case 71: case 73: return "SNOW";
+    case 75: return "HEAVY SNOW";
+    case 77: return "SNOW GRAINS";
+    case 80: case 81: return "SHOWERS";
+    case 82: return "HEAVY SHOWERS";
+    case 85: case 86: return "SNOW SHOWERS";
+    case 95: return "THUNDERSTORM";
+    case 96: case 99: return "THUNDER, HAIL";
+  }
+  return "";
+}
+
+static uint16_t wxColor(char c)
+{
+  switch (c)
+  {
+    case 'Y': return col(255, 190,   0);   // sun
+    case 'r': return col(255, 140,   0);   // sun's rays
+    case 'M': return col(230, 225, 170);   // moon
+    case '*': return col(255, 255, 200);   // star
+    case 'W': return col(200, 205, 215);   // light cloud
+    case 'D': return col(120, 128, 140);   // grey cloud
+    case 'T': return col( 85,  90, 105);   // storm cloud
+    case 'B': return col( 60, 140, 255);   // rain
+    case 'S': return col(220, 230, 255);   // snow
+    case 'F': return col(140, 145, 155);   // fog
+    case 'Z': return col(255, 230,   0);   // lightning
+    case 'H': return col(255, 140,  60);   // high
+    case 'L': return col( 90, 160, 255);   // low
+  }
+  return 0;
+}
+
+// Draws a sprite of character rows; '.' is transparent and every other
+// character is a color from wxColor, or 'X' for the color passed in.
+static void wxSprite(int16_t x, int16_t y, const char* const* rows, uint8_t h, uint16_t xColor = 0)
+{
+  for (uint8_t r = 0; r < h; r++)
+    for (uint8_t c = 0; rows[r][c]; c++)
+    {
+      const char ch = rows[r][c];
+      if (ch == '.') continue;
+      matrix->drawPixel(x + c, y + r, ch == 'X' ? xColor : wxColor(ch));
+    }
+}
+
+// A cloud, 13x7, in whichever shade is passed: two bumps and rounded ends,
+// which read as a cloud where overlapping circles came out as a dome on a box.
+static const char* const WX_CLOUD[7] = {
+  "....XXX......",
+  "...XXXXX.XX..",
+  "..XXXXXXXXXX.",
+  ".XXXXXXXXXXXX",
+  "XXXXXXXXXXXXX",
+  "XXXXXXXXXXXXX",
+  ".XXXXXXXXXXX.",
+};
+
+static const char* const WX_BOLT[5] = { "..ZZ", ".ZZ.", "ZZ..", ".ZZ.", "Z..." };
+
+// The week screen's icons, 7x7 and still.
+static const char* const WX_SMALL[8][7] = {
+  { "...r...", ".r...r.", "..YYY..", "rYYYYYr", "..YYY..", ".r...r.", "...r..." },   // clear
+  { "r.r....", ".YY....", "rYYWW..", "..WWWW.", ".WWWWWW", "WWWWWWW", ".WWWWW." },   // partly
+  { ".......", "...WW..", ".WWWWW.", "WWWWWWW", "WWWWWWW", ".WWWWW.", "......." },   // cloudy
+  { ".......", "FFFFF..", ".......", ".FFFFFF", ".......", "FFFFF..", "......." },   // fog
+  { "..DD...", ".DDDDD.", "DDDDDDD", ".......", ".B...B.", "...B...", "......." },   // drizzle
+  { "..DD...", ".DDDDD.", "DDDDDDD", ".......", "B.B.B..", ".B.B.B.", "B.B.B.." },   // rain
+  { "..DD...", ".DDDDD.", "DDDDDDD", ".......", ".S..S..", "...S..S", "S..S..." },   // snow
+  { "..TT...", ".TTTTT.", "TTTTTTT", "...Z...", "..ZZ...", "...ZZ..", "...Z..." },   // thunder
+};
+
+static void wxSun(int16_t cx, int16_t cy, int16_t r, float t)
+{
+  matrix->fillCircle(cx, cy, r, wxColor('Y'));
+
+  // Eight rays; the straight and the diagonal four take turns being long, so
+  // the sun seems to turn.
+  const uint8_t phase = (uint8_t)(t * 2.5f) & 1;
+  for (uint8_t k = 0; k < 8; k++)
+  {
+    const float   a  = k * 0.7854f;
+    const int16_t r1 = r + ((k & 1) == phase ? 3 : 2);
+    for (int16_t rr = r + 2; rr <= r1; rr++)
+      matrix->drawPixel(cx + (int16_t)lroundf(cosf(a) * rr), cy + (int16_t)lroundf(sinf(a) * rr),
+                        wxColor('r'));
+  }
+}
+
+// A crescent: a disc with a second, black disc cut out of its top right.
+static void wxMoon(int16_t cx, int16_t cy, int16_t r)
+{
+  matrix->fillCircle(cx, cy, r, wxColor('M'));
+  matrix->fillCircle(cx + 3, cy - 2, r, 0);
+}
+
+// Rain, drizzle or snow falling from under a cloud, in the 16x8 band below
+// it. Each column has its own phase so the drops do not fall in step.
+static void wxFalling(int16_t x, int16_t y, uint8_t kind, float t)
+{
+  static const uint8_t COLS[5]   = { 1, 4, 7, 10, 13 };
+  static const uint8_t DCOLS[3]  = { 2, 7, 12 };
+  const bool    drizzle = (kind == WX_DRIZZLE);
+  const uint8_t n       = drizzle ? 3 : 5;
+  float speed = 10.0f;
+  if (kind == WX_SNOW) speed = 3.0f;
+  if (drizzle)         speed = 6.0f;
+
+  for (uint8_t k = 0; k < n; k++)
+  {
+    const int16_t cx = x + (drizzle ? DCOLS[k] : COLS[k]);
+    const int16_t py = y + 8 + (int16_t)fmodf(t * speed + k * 3.7f, 8.0f);
+    if (kind == WX_SNOW)  matrix->drawPixel(cx + (int16_t)lroundf(sinf(t * 2.0f + k)), py, wxColor('S'));
+    else if (drizzle)     matrix->drawPixel(cx, py, wxColor('B'));
+    else                  matrix->drawFastVLine(cx, py, 2, wxColor('B'));
+  }
+}
+
+// The now screen's 16x16 icon. t is seconds, for the animation.
+static void wxIcon(int16_t x, int16_t y, uint8_t kind, bool day, float t)
+{
+  switch (kind)
+  {
+    case WX_CLEAR:
+      if (day) { wxSun(x + 7, y + 7, 3, t); break; }
+      wxMoon(x + 6, y + 8, 5);
+      {
+        // Three stars, one of them out at any moment, taking turns.
+        static const int8_t STARS[3][2] = { { 12, 2 }, { 14, 7 }, { 11, 12 } };
+        for (uint8_t k = 0; k < 3; k++)
+          if (((uint8_t)(t * 3.0f) + k) % 3) matrix->drawPixel(x + STARS[k][0], y + STARS[k][1], wxColor('*'));
+      }
+      break;
+
+    case WX_PARTLY:
+      if (day) wxSun(x + 5, y + 5, 2, t);
+      else     wxMoon(x + 5, y + 6, 4);
+      wxSprite(x + 2 + (int16_t)lroundf(sinf(t * 0.8f)), y + 8, WX_CLOUD, 7, wxColor('W'));
+      break;
+
+    case WX_CLOUDY:
+    {
+      // Two clouds drifting past each other.
+      const int16_t dx = (int16_t)lroundf(sinf(t * 0.6f) * 1.4f);
+      wxSprite(x + 3 - dx, y + 1, WX_CLOUD, 7, wxColor('D'));
+      wxSprite(x + dx,     y + 8, WX_CLOUD, 7, wxColor('W'));
+      break;
+    }
+
+    case WX_FOG:
+    {
+      static const uint8_t ROWS[4] = { 3, 6, 9, 12 };
+      static const uint8_t LENS[4] = { 10, 12, 10, 12 };
+      for (uint8_t k = 0; k < 4; k++)
+        matrix->drawFastHLine(x + 1 + (k & 1) + (int16_t)lroundf(sinf(t * 0.9f + k * 1.3f) * 1.5f),
+                              y + ROWS[k], LENS[k], wxColor('F'));
+      break;
+    }
+
+    default:   // drizzle, rain, snow, thunder: a cloud with something under it
+      wxSprite(x + 1, y, WX_CLOUD, 7, wxColor(kind == WX_THUNDER ? 'T' : 'D'));
+      wxFalling(x, y, kind == WX_THUNDER ? WX_RAIN : kind, t);
+      if (kind == WX_THUNDER && ((uint8_t)(t * 3.0f) % 4) == 0)
+        wxSprite(x + 6, y + 8, WX_BOLT, 5);
+      break;
+  }
+}
+
+static const char* const WX_DOW[7] = { "SU", "MO", "TU", "WE", "TH", "FR", "SA" };
+
+// Seconds, for the icon animations. Wrapped every hour so the float keeps
+// enough precision to move smoothly however long the device has been up.
+static float wxTime()
+{
+  return (millis() % 3600000UL) / 1000.0f;
+}
+
+// Shown in place of a city's screens until its first fetch lands, and when
+// the weather is on but no city has been added.
+static void drawWeatherWaiting(const char* name)
+{
+  clearFrame();
+  if (name && *name)
+  {
+    if (bigWidth(name) <= PANEL_W) drawBig(0, 4, name, C_LABEL());
+    else                           drawTiny(0, 5, name, C_LABEL());
+    drawTiny(0, 18, "WAITING FOR", C_DIM());
+    drawTiny(0, 25, "WEATHER", C_DIM());
+  }
+  else
+  {
+    drawTiny(0,  4, "NO CITY YET", C_ACCENT());
+    drawTiny(0, 13, "ADD ONE ON THE", C_DIM());
+    drawTiny(0, 20, "WEATHER TAB", C_DIM());
+  }
+}
+
+static void drawWeatherNow(const char* name, const CityWeather& w)
+{
+  clearFrame();
+  wxIcon(0, 0, wxKind(w.code), w.isDay, wxTime());
+
+  // The temperature in the logo's font, with a small square ring for the
+  // degree sign - the font has none.
+  char t[8];
+  snprintf(t, sizeof(t), "%ld", lroundf(w.temp));
+  matrix->setFont(&FreeSansBold9pt7b);
+  matrix->setTextColor(C_PRICE());
+  matrix->setCursor(18, 13);
+  matrix->print(t);
+  const int16_t after = matrix->getCursorX();
+  matrix->setFont(NULL);
+  matrix->drawRect(after + 1, 1, 3, 3, C_PRICE());
+
+  // Today's high and low at the right edge, behind the same triangles the
+  // tickers use - left out if a long temperature has taken the room.
+  if (w.days)
+  {
+    char hi[6], lo[6];
+    snprintf(hi, sizeof(hi), "%d", w.day[0].hi);
+    snprintf(lo, sizeof(lo), "%d", w.day[0].lo);
+    const int16_t wHi = arrowPctWidth(hi, false), wLo = arrowPctWidth(lo, false);
+    if (after + 5 <= PANEL_W - (wHi > wLo ? wHi : wLo))
+    {
+      drawArrowPct(PANEL_W - wHi, 2, hi, true,  false, wxColor('H'));
+      drawArrowPct(PANEL_W - wLo, 9, lo, false, false, wxColor('L'));
+    }
+  }
+
+  if (bigWidth(name) <= PANEL_W) drawBig(0, 18, name, C_LABEL());
+  else                           drawTiny(0, 19, name, C_LABEL());
+  drawTiny(0, 27, wxText(w.code), C_DIM());
+}
+
+static void drawWeatherWeek(const char* name, const CityWeather& w)
+{
+  clearFrame();
+
+  // Seven columns 9 px apart: the small font's two-letter day, a 7x7 icon,
+  // then the high over the low. Today, the first, has its day in the label
+  // color.
+  //
+  // A column fits two characters with a pixel to spare. A three-character
+  // temperature - -10 and below, or 100 and up - is 11 px and ran straight
+  // into the next day's figure, so a week with one in it shows five days in
+  // 12 px columns instead of seven that collide.
+  bool wide = false;
+  for (uint8_t i = 0; i < w.days && i < UPTICK_WX_DAYS; i++)
+    if (w.day[i].hi < -9 || w.day[i].hi > 99 || w.day[i].lo < -9 || w.day[i].lo > 99) wide = true;
+
+  const uint8_t days  = wide ? 5 : UPTICK_WX_DAYS;
+  const int16_t pitch = wide ? 12 : 9;
+  const int16_t left  = wide ? 2 : 1;
+
+  for (uint8_t i = 0; i < w.days && i < days; i++)
+  {
+    const WeatherDay& d = w.day[i];
+    const int16_t     x = left + i * pitch;
+    char hi[6], lo[6];
+    snprintf(hi, sizeof(hi), "%d", d.hi);
+    snprintf(lo, sizeof(lo), "%d", d.lo);
+
+    drawTiny(x, 0, WX_DOW[d.dow % 7], i == 0 ? C_LABEL() : C_DIM());
+    wxSprite(x, 6, WX_SMALL[wxKind(d.code)], 7);
+    drawTiny(x, 14, hi, wxColor('H'));
+    drawTiny(x, 20, lo, wxColor('L'));
+  }
+
+  // The city along the bottom, in capitals: the small font's lower case has
+  // descenders that would run off the panel.
+  char up[25];
+  snprintf(up, sizeof(up), "%s", name);
+  for (char* p = up; *p; p++) *p = toupper((unsigned char)*p);
+  drawTiny((PANEL_W - tinyWidth(up)) / 2, 27, up, C_LABEL());
+}
+
+// Which city and screen the weather is on. The task moves these along.
+static bool     s_wxOn     = false;
+static uint8_t  s_wxCity   = 0;
+static uint8_t  s_wxScreen = 0;     // 0 now, 1 week
+static uint32_t s_wxAt     = 0;     // when the current screen went up
+static const uint8_t WX_FPS = 20;
+
+static void drawWeather(const Config& cfg)
+{
+  if (!cfg.cityCount) { drawWeatherWaiting(nullptr); return; }
+
+  const uint8_t i = s_wxCity < cfg.cityCount ? s_wxCity : 0;
+  CityWeather w;
+  {
+    WeatherLock lk;
+    w = g_weather[i];
+  }
+  const char* name = cfg.cities[i].name.c_str();
+
+  if (!w.valid)            drawWeatherWaiting(name);
+  else if (s_wxScreen == 0) drawWeatherNow(name, w);
+  else                      drawWeatherWeek(name, w);
+}
+
 // ---------------------------------------------------------------- screens
 
 static void drawSetup()
@@ -1291,9 +1633,22 @@ struct TickRow
 
 static TickRow s_rows[2];
 
+// The weather's hook into the tickers. With the weather mixed in (s_wxMix, set
+// by the task), each ticker reports the end of a full pass through the feeds
+// in s_lapDone, and the task then plays the weather screens.
+//
+// The horizontal tape has no natural end, so it is given one: once the top
+// row has fed in its last feed, s_tickDrain stops both rows taking any more,
+// the tape scrolls off empty, and the pass is over. Afterwards it restarts
+// full from the left, the way it does when the mode is first chosen.
+static bool s_wxMix     = false;
+static bool s_lapDone   = false;
+static bool s_tickDrain = false;
+
 static void tickerReset()
 {
   memset(s_rows, 0, sizeof(s_rows));
+  s_tickDrain = false;
 }
 
 static void tickerEntry(const Config& cfg, uint8_t feed, int16_t x, TickEntry& t)
@@ -1340,7 +1695,8 @@ static void tickerEntry(const Config& cfg, uint8_t feed, int16_t x, TickEntry& t
 // Moves one section a pixel left, retires what has left, feeds the right edge
 // and draws what is in view. first and n are its slice of the feed list; yTop
 // is the top of its 16 px band.
-static void tickerRow(const Config& cfg, TickRow& r, uint8_t first, uint8_t n, int16_t yTop)
+static void tickerRow(const Config& cfg, TickRow& r, uint8_t first, uint8_t n, int16_t yTop,
+                      bool* wrapped = nullptr)
 {
   for (uint8_t k = 0; k < r.count; k++) r.e[k].x--;
 
@@ -1350,7 +1706,7 @@ static void tickerRow(const Config& cfg, TickRow& r, uint8_t first, uint8_t n, i
     r.count--;
   }
 
-  if (n)
+  if (n && !s_tickDrain)
   {
     if (r.next >= n) r.next = 0;          // the list shrank under us
 
@@ -1363,6 +1719,7 @@ static void tickerRow(const Config& cfg, TickRow& r, uint8_t first, uint8_t n, i
 
       tickerEntry(cfg, first + r.next, at, r.e[r.count++]);
       r.next = (r.next + 1) % n;
+      if (r.next == 0 && wrapped) *wrapped = true;   // every feed in this row has entered
     }
   }
 
@@ -1380,12 +1737,13 @@ static void drawTicker(const Config& cfg)
 {
   clearFrame();
 
-  const uint8_t n = cfg.feedCount;
+  bool          wrapped = false;
+  const uint8_t n       = cfg.feedCount;
   if (n >= 2)
   {
     // Top takes the odd one out.
     const uint8_t top = (n + 1) / 2;
-    tickerRow(cfg, s_rows[0], 0,   top,     0);
+    tickerRow(cfg, s_rows[0], 0,   top,     0, &wrapped);
     tickerRow(cfg, s_rows[1], top, n - top, 16);
 
     // Row 15 is the blank row between the sections, so a line there touches
@@ -1395,9 +1753,14 @@ static void drawTicker(const Config& cfg)
   }
   else
   {
-    tickerRow(cfg, s_rows[0], 0, n, 8);
+    tickerRow(cfg, s_rows[0], 0, n, 8, &wrapped);
     s_rows[1].count = 0;                  // so its old entries cannot return
   }
+
+  // The top row has fed in every feed: stop feeding, and once the tape has
+  // scrolled off empty the pass is complete.
+  if (wrapped && s_wxMix) s_tickDrain = true;
+  if (s_tickDrain && !s_rows[0].count && !s_rows[1].count) s_lapDone = true;
 }
 
 // ---------------------------------------------------------------- vertical ticker
@@ -1422,11 +1785,14 @@ static uint8_t  s_vTop    = 0;       // feed in the top slot
 static uint8_t  s_vOff    = 0;       // rows the list has risen past it
 static uint32_t s_vHoldTo = 0;       // millis() the current pause ends
 
+static uint32_t s_vLapAt = 0;          // when the list last started from the top
+
 static void verticalReset(const Config& cfg)
 {
   s_vTop    = 0;
   s_vOff    = 0;
   s_vHoldTo = millis() + (uint32_t)cfg.pauseSec * 1000UL;
+  s_vLapAt  = millis();
 }
 
 static void drawVerticalEntry(const Config& cfg, uint8_t feed, int16_t yTop)
@@ -1458,6 +1824,9 @@ static void drawVertical(const Config& cfg)
   if (n <= 2)
   {
     for (uint8_t k = 0; k < n; k++) drawVerticalEntry(cfg, k, n == 1 ? 8 : k * V_BLOCK);
+
+    // Nothing moves, so a pass is a feed's dwell time instead.
+    if (s_wxMix && millis() - s_vLapAt > (uint32_t)cfg.dwellSec * 1000UL) s_lapDone = true;
     return;
   }
 
@@ -1469,6 +1838,7 @@ static void drawVertical(const Config& cfg)
   {
     s_vOff    = 0;
     s_vTop    = (s_vTop + 1) % n;
+    if (s_vTop == 0 && s_wxMix) s_lapDone = true;   // back at the top: a full pass
     s_vHoldTo = millis() + (uint32_t)cfg.pauseSec * 1000UL;
   }
 
@@ -1555,7 +1925,7 @@ bool displayBegin()
   return true;
 }
 
-enum : uint8_t { ANIM_NONE, ANIM_HORIZONTAL, ANIM_VERTICAL, ANIM_CHART };
+enum : uint8_t { ANIM_NONE, ANIM_HORIZONTAL, ANIM_VERTICAL, ANIM_CHART, ANIM_WEATHER };
 
 void displayTask(void* arg)
 {
@@ -1628,16 +1998,67 @@ void displayTask(void* arg)
 
     if (feedIdx >= cfg.feedCount) feedIdx = 0;
 
-    if (cfg.feedCount > 1 && millis() - lastSwap > (uint32_t)cfg.dwellSec * 1000UL)
+    // What the panel shows. The test screens are never interrupted, and the
+    // weather only joins the tickers once there is a city to show.
+    const bool testMode = cfg.mode == "palette_test" || cfg.mode == "ramp_test";
+    const bool wxOnly   = !testMode && cfg.show == "weather";
+    s_wxMix             = !testMode && cfg.show == "both" && cfg.cityCount > 0;
+    if (!wxOnly && !s_wxMix)
     {
-      lastSwap = millis();
-      feedIdx  = (feedIdx + 1) % cfg.feedCount;
+      s_wxOn      = false;
+      s_lapDone   = false;
+      s_tickDrain = false;
     }
 
-    // Only single_chart shows one feed at a time. Everything else - the multi
-    // price list, the test screens, the setup screens - leaves the fetcher
-    // free to poll whatever is due.
-    s_visibleFeed = (cfg.mode == "single_chart") ? (int8_t)feedIdx : (int8_t)-1;
+    // The chart's pass ends when the last feed's turn does. A single feed has
+    // no rotation, so its dwell is the pass.
+    if (!s_wxOn && millis() - lastSwap > (uint32_t)cfg.dwellSec * 1000UL &&
+        (cfg.feedCount > 1 || s_wxMix))
+    {
+      lastSwap = millis();
+      const bool lap = feedIdx + 1 >= cfg.feedCount;
+      feedIdx = (feedIdx + 1) % cfg.feedCount;
+      if (lap && s_wxMix && cfg.mode == "single_chart") s_lapDone = true;
+    }
+
+    // The weather: every city's now and week screens in turn, weatherSec each.
+    // After a pass of the tickers that is one round, then back to them; with
+    // the tickers off it simply goes round again.
+    {
+      const uint32_t now = millis();
+      if (!s_wxOn && (wxOnly || (s_wxMix && s_lapDone)))
+      {
+        s_wxOn      = true;
+        s_lapDone   = false;
+        s_wxCity    = 0;
+        s_wxScreen  = 0;
+        s_wxAt      = now;
+        Serial.printf("[disp] weather on, %u cities\n", cfg.cityCount);
+      }
+      if (s_wxOn && now - s_wxAt >= (uint32_t)cfg.weatherSec * 1000UL)
+      {
+        s_wxAt = now;
+        if (++s_wxScreen > 1) { s_wxScreen = 0; s_wxCity++; }
+        if (s_wxCity >= cfg.cityCount)
+        {
+          s_wxCity = 0;
+          if (!wxOnly)
+          {
+            // Back to the tickers. They restart through the change of
+            // animation below; the chart picks up at its first feed.
+            s_wxOn   = false;
+            feedIdx  = 0;
+            lastSwap = now;
+            Serial.println("[disp] weather done, back to the tickers");
+          }
+        }
+      }
+    }
+
+    // Only the chart shows one feed at a time. Everything else - the tickers,
+    // the weather, the test and setup screens - leaves the fetcher free to
+    // poll whatever is due.
+    s_visibleFeed = (cfg.mode == "single_chart" && !s_wxOn) ? (int8_t)feedIdx : (int8_t)-1;
 
     Quote q;
     {
@@ -1677,6 +2098,7 @@ void displayTask(void* arg)
     // while it snows, since the snow moves even when the chart does not. They
     // stand aside for the setup and just-joined screens, which matter more.
     const uint8_t anim = (g_net.apMode || showInfo)              ? ANIM_NONE
+                       : s_wxOn                                 ? ANIM_WEATHER
                        : cfg.mode == "ticker"                   ? ANIM_HORIZONTAL
                        : cfg.mode == "ticker_vertical"          ? ANIM_VERTICAL
                        : (snow && cfg.mode == "single_chart")   ? ANIM_CHART
@@ -1699,6 +2121,7 @@ void displayTask(void* arg)
       const uint32_t t0 = micros();
       if (anim == ANIM_HORIZONTAL)    drawTicker(cfg);
       else if (anim == ANIM_VERTICAL) drawVertical(cfg);
+      else if (anim == ANIM_WEATHER)  drawWeather(cfg);
       else if (!q.valid)              drawWaiting(cfg.feeds[feedIdx]);
       else                            drawSingleChart(cfg, cfg.feeds[feedIdx], q, stale);
       if (snow) drawSanta();          // over the content, unlike the snow
@@ -1710,7 +2133,8 @@ void displayTask(void* arg)
       // sets the scroll speed. The chart has nothing to scroll and runs at a
       // fixed rate just for the snow.
       s_stackFree = uxTaskGetStackHighWaterMark(nullptr);
-      const uint16_t fps = (anim == ANIM_CHART) ? SNOW_FPS
+      const uint16_t fps = (anim == ANIM_CHART)   ? SNOW_FPS
+                         : (anim == ANIM_WEATHER) ? WX_FPS
                          : (cfg.scrollSpeed ? cfg.scrollSpeed : 20);
       const TickType_t period = pdMS_TO_TICKS(1000 / fps);
       vTaskDelayUntil(&wake, period ? period : 1);

@@ -73,6 +73,7 @@ static void handleStatus()
   d["stackDisplay"] = ds.stackFree;
   d["tickerDrawUs"] = ds.tickerUs;
   d["maxFeeds"]     = UPTICK_MAX_FEEDS;
+  d["maxCities"]    = UPTICK_MAX_CITIES;
 
   String out;
   serializeJson(d, out);
@@ -210,6 +211,74 @@ static void handleTheme()
     g_cfgRev++;
   }
   sendOk();
+}
+
+// What the panel shows: tickers, tickers and weather, or weather only. Live,
+// like the mode; Save keeps it.
+static void handleShow()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  const String v = d["show"] | "";
+  if (v != "tickers" && v != "both" && v != "weather") { sendErr(400, "unknown show"); return; }
+
+  {
+    CfgLock lk;
+    g_cfg.show = v;
+    g_cfgRev++;
+  }
+  sendOk();
+}
+
+// The weather as the device last fetched it, one entry per configured city,
+// so the web page can show what the panel is working from.
+static void handleWeather()
+{
+  CityWeather w[UPTICK_MAX_CITIES];
+  {
+    WeatherLock lk;
+    memcpy(w, g_weather, sizeof(w));
+  }
+  uint8_t n;
+  String  units;
+  String  names[UPTICK_MAX_CITIES];
+  {
+    CfgLock lk;
+    n     = g_cfg.cityCount;
+    units = g_cfg.weatherUnits;
+    for (uint8_t i = 0; i < n; i++) names[i] = g_cfg.cities[i].name;
+  }
+
+  JsonDocument d;
+  d["units"] = units;
+  JsonArray arr = d["cities"].to<JsonArray>();
+  for (uint8_t i = 0; i < n; i++)
+  {
+    JsonObject o = arr.add<JsonObject>();
+    o["name"]  = names[i];
+    o["valid"] = w[i].valid;
+    if (!w[i].valid) continue;
+    o["temp"]  = serialized(String(w[i].temp, 1));
+    o["code"]  = w[i].code;
+    o["isDay"] = w[i].isDay;
+    o["ageSec"] = (millis() - w[i].fetchedMs) / 1000;
+    JsonArray days = o["days"].to<JsonArray>();
+    for (uint8_t k = 0; k < w[i].days; k++)
+    {
+      JsonObject dd = days.add<JsonObject>();
+      dd["dow"]  = w[i].day[k].dow;
+      dd["code"] = w[i].day[k].code;
+      dd["hi"]   = w[i].day[k].hi;
+      dd["lo"]   = w[i].day[k].lo;
+    }
+  }
+
+  String out;
+  serializeJson(d, out);
+  sendJson(200, out);
 }
 
 // Santa flies every few minutes on his own; this is for not having to wait.
@@ -674,6 +743,8 @@ void netBegin()
   http.on("/api/mode",       HTTP_POST, handleMode);
   http.on("/api/theme",      HTTP_POST, handleTheme);
   http.on("/api/santa",      HTTP_POST, handleSanta);
+  http.on("/api/show",       HTTP_POST, handleShow);
+  http.on("/api/weather",    HTTP_GET,  handleWeather);
   http.on("/api/defaults",   HTTP_POST, handleDefaults);
   http.on("/api/apikey",     HTTP_POST, handleApiKey);
   http.on("/api/fetch",      HTTP_POST, handleFetch);
@@ -707,6 +778,7 @@ void netTask(void* arg)
     if (g_net.apMode) dns.processNextRequest();
     http.handleClient();
     marketPoll();
+    weatherPoll();
 
     // The matrix runs off DMA on the other core, so blocking here costs no
     // frames - but a silently dead link would leave the panel showing a stale

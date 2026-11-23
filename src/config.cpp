@@ -31,6 +31,12 @@ void configDefaults(Config& c)
   c.feeds[1]   = { "binance", "ETHUSDT", "ETH", "1h", 0 };
   c.feeds[2]   = { "binance", "SOLUSDT", "SOL", "1h", 0 };
   c.feeds[3]   = { "binance", "ZECUSDT", "ZEC", "1h", 0 };
+
+  // No cities until one is added, so the weather screens stay out of the way.
+  c.show         = "tickers";
+  c.weatherUnits = "c";
+  c.weatherSec   = 8;
+  c.cityCount    = 0;
 }
 
 static void feedToJson(const Feed& f, JsonObject o)
@@ -152,6 +158,18 @@ String configToJson()
     JsonArray feeds = d["feeds"].to<JsonArray>();
     for (uint8_t i = 0; i < g_cfg.feedCount; i++)
       feedToJson(g_cfg.feeds[i], feeds.add<JsonObject>());
+
+    d["show"]         = g_cfg.show;
+    d["weatherUnits"] = g_cfg.weatherUnits;
+    d["weatherSec"]   = g_cfg.weatherSec;
+    JsonArray cities = d["cities"].to<JsonArray>();
+    for (uint8_t i = 0; i < g_cfg.cityCount; i++)
+    {
+      JsonObject o = cities.add<JsonObject>();
+      o["name"] = g_cfg.cities[i].name;
+      o["lat"]  = serialized(String(g_cfg.cities[i].lat, 4));
+      o["lon"]  = serialized(String(g_cfg.cities[i].lon, 4));
+    }
   }
   paletteToJson(d["palette"].to<JsonObject>());
 
@@ -210,6 +228,30 @@ bool configFromJson(const String& body, String& err)
     feedFromJson(o, f);
     if (f.symbol.isEmpty()) { err = "feed with empty symbol"; return false; }
     c.feeds[c.feedCount++] = f;
+  }
+
+  // Weather. Like the theme, anything unknown falls back to the default rather
+  // than failing the document, and a city that makes no sense is skipped - a
+  // backup should always restore. Names are trimmed to what the panel can
+  // show in its small font.
+  c.show = d["show"] | "tickers";
+  if (c.show != "both" && c.show != "weather") c.show = "tickers";
+  c.weatherUnits = (String(d["weatherUnits"] | "c") == "f") ? "f" : "c";
+  c.weatherSec   = constrain((int)(d["weatherSec"] | 8), 3, 60);
+
+  c.cityCount = 0;
+  for (JsonObjectConst o : d["cities"].as<JsonArrayConst>())
+  {
+    if (c.cityCount >= UPTICK_MAX_CITIES) break;
+    City city;
+    city.name = String(o["name"] | "");
+    city.name.trim();
+    if (city.name.length() > 24) city.name = city.name.substring(0, 24);
+    if (city.name.isEmpty() || o["lat"].isNull() || o["lon"].isNull()) continue;
+    city.lat = o["lat"].as<float>();
+    city.lon = o["lon"].as<float>();
+    if (city.lat < -90 || city.lat > 90 || city.lon < -180 || city.lon > 180) continue;
+    c.cities[c.cityCount++] = city;
   }
 
   // Quotes are indexed by feed position, so reordering or deleting a feed

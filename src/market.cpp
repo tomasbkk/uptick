@@ -475,7 +475,7 @@ static String buildUrl(const Feed& f)
 
 // ---------------------------------------------------------------- fetch
 
-static void prepareClient(WiFiClientSecure& client, HTTPClient& https)
+void marketPrepareClient(WiFiClientSecure& client, HTTPClient& https)
 {
 #ifdef UPTICK_TLS_INSECURE
   client.setInsecure();
@@ -505,7 +505,7 @@ static bool fetch24h(const Feed& f, float& pct)
 {
   WiFiClientSecure client;
   HTTPClient       https;
-  prepareClient(client, https);
+  marketPrepareClient(client, https);
 
   const bool coinbase  = (f.source == "coinbase");
   const bool coingecko = (f.source == "coingecko");
@@ -569,7 +569,7 @@ bool marketProbeYahoo(const String& symbol, float& price, String& name, String& 
 {
   WiFiClientSecure client;
   HTTPClient       https;
-  prepareClient(client, https);
+  marketPrepareClient(client, https);
 
   // The narrowest range there is: nothing here needs the series, only meta.
   const String url = "https://query1.finance.yahoo.com/v8/finance/chart/" +
@@ -626,7 +626,7 @@ static bool fetchYahooExtended(const Feed& f, float& price, uint32_t& ts)
 
   WiFiClientSecure client;
   HTTPClient       https;
-  prepareClient(client, https);
+  marketPrepareClient(client, https);
 
   const String url = "https://query1.finance.yahoo.com/v8/finance/chart/" + urlEncode(f.symbol) +
                      "?range=1d&interval=5m&includePrePost=true";
@@ -659,7 +659,7 @@ static bool fetchFeed(const Feed& f, Quote& q)
 {
   WiFiClientSecure client;
   HTTPClient       https;
-  prepareClient(client, https);
+  marketPrepareClient(client, https);
 
   String url = buildUrl(f);
   if (!https.begin(client, url))
@@ -929,7 +929,7 @@ static bool getJson(const String& url, JsonDocument& filter, JsonDocument& doc,
 
   WiFiClientSecure client;
   HTTPClient       https;
-  prepareClient(client, https);
+  marketPrepareClient(client, https);
 
   if (!https.begin(client, url))
   {
@@ -1221,6 +1221,9 @@ void marketPoll()
     cfg     = g_cfg;
     seenRev = g_cfgRev;
   }
+
+  // Weather only: nothing on the panel needs a price, so nothing is fetched.
+  if (cfg.show == "weather") return;
 
   const uint32_t now = millis();
 

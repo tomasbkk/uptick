@@ -115,6 +115,7 @@
 
   <nav class="tabs">
     <button data-tab="tickers"  onclick="showTab('tickers')">Tickers</button>
+    <button data-tab="weather"  onclick="showTab('weather')">Weather</button>
     <button data-tab="display"  onclick="showTab('display')">Display</button>
     <button data-tab="settings" onclick="showTab('settings')">Settings</button>
   </nav>
@@ -137,11 +138,52 @@
   </section>
 
   <!-- ============================================================ display -->
+  <section class="tab" id="tab-weather">
+    <div class="card">
+      <h2>Cities</h2>
+      <label>Find a city</label>
+      <div class="symrow">
+        <input id="wxSearch" placeholder="Bangkok" onkeydown="if (event.key === 'Enter') wxFind()">
+        <button onclick="wxFind()">search</button>
+      </div>
+      <div id="wxResults"></div>
+      <div id="cities"></div>
+      <p class="hint">Each city gets two screens on the panel: the weather now, then the next seven days. The name is what the panel shows - edit it to shorten a long one. Forecasts come from Open-Meteo, which needs no key, and refresh every 15 minutes.</p>
+    </div>
+
+    <div class="card">
+      <h2>Weather screens</h2>
+      <div class="row">
+        <div>
+          <label>Units</label>
+          <select id="weatherUnits">
+            <option value="c">&deg;C</option>
+            <option value="f">&deg;F</option>
+          </select>
+        </div>
+        <div>
+          <label>Seconds per screen</label>
+          <input id="weatherSec" type="number" min="3" max="60">
+        </div>
+      </div>
+      <p class="hint">Whether the weather shows at all is <b>Show</b> on the Display tab.</p>
+      <div id="wxNow"></div>
+    </div>
+  </section>
+
   <section class="tab" id="tab-display">
     <div class="card">
       <h2>Display</h2>
       <label>Brightness <span id="briVal"></span></label>
       <input type="range" id="brightness" min="1" max="100" oninput="liveBrightness()">
+
+      <label>Show</label>
+      <select id="show" onchange="liveShow()">
+        <option value="tickers">tickers only</option>
+        <option value="both">tickers and weather</option>
+        <option value="weather">weather only</option>
+      </select>
+      <p class="hint forBoth">The weather screens play once after every full pass through the tickers. Weather only stops price fetching altogether.</p>
 
       <label>Mode</label>
       <select id="mode" onchange="liveMode()">
@@ -272,6 +314,7 @@ let cfg = null;
 
 // Feed limit, from the device's own UPTICK_MAX_FEEDS via /api/status.
 let maxFeeds = 32;
+let maxCities = 8;
 
 const $ = id => document.getElementById(id);
 
@@ -304,6 +347,7 @@ async function loadStatus() {
   }
   $('ver').textContent = 'v' + s.version;
   if (s.maxFeeds) maxFeeds = s.maxFeeds;
+  if (s.maxCities) maxCities = s.maxCities;
   if (s.bitDepth) $('panelInfo').textContent = s.bitDepth + '-bit colour at ' + s.refreshHz + ' Hz';
   $('status').textContent = s.mode === 'ap'
     ? 'setup mode - AP ' + s.ssid + ' at ' + s.ip
@@ -369,6 +413,13 @@ async function loadConfig() {
   if (!$('mode').value) $('mode').value = 'single_chart';
   $('theme').value       = cfg.theme === 'snow' ? 'snow' : 'none';
   themeControls();
+  $('show').value         = ['both', 'weather'].includes(cfg.show) ? cfg.show : 'tickers';
+  showControls();
+  $('weatherUnits').value = cfg.weatherUnits === 'f' ? 'f' : 'c';
+  $('weatherSec').value   = cfg.weatherSec || 8;
+  cfg.cities = cfg.cities || [];
+  renderCities();
+  loadWeather();
   modeControls();
   $('dwellSec').value    = cfg.dwellSec;
   $('scrollSpeed').value = cfg.scrollSpeed || 20;
@@ -772,6 +823,107 @@ function liveTheme() {
     .then(r => { if (!r.ok) toast('could not switch theme', true); });
 }
 
+// ---------------------------------------------------------------- weather
+
+// What the panel shows, live like the mode; Save keeps it.
+function liveShow() {
+  showControls();
+  dirty();
+  fetch('/api/show', { method:'POST', body: JSON.stringify({ show: $('show').value }) })
+    .then(r => { if (!r.ok) toast('could not switch', true); });
+}
+
+function showControls() {
+  document.querySelectorAll('.forBoth')
+          .forEach(el => el.classList.toggle('hide', $('show').value === 'tickers'));
+}
+
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+// City search goes straight to Open-Meteo's geocoder from the browser - it
+// sends a CORS header, unlike Yahoo - so the device is not involved until the
+// list is saved.
+let wxFound = [];
+async function wxFind() {
+  const q = $('wxSearch').value.trim();
+  if (!q) return;
+  $('wxResults').innerHTML = '<p class="hint">searching...</p>';
+  try {
+    const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=6&language=en&format=json&name=' +
+                          encodeURIComponent(q));
+    const d = await r.json();
+    wxFound = d.results || [];
+  } catch (e) {
+    $('wxResults').innerHTML = '<p class="hint">could not reach the city search: ' + esc(e.message) + '</p>';
+    return;
+  }
+  if (!wxFound.length) { $('wxResults').innerHTML = '<p class="hint">no city by that name</p>'; return; }
+  $('wxResults').innerHTML = wxFound.map((c, i) =>
+    '<div class="lv"><button onclick="wxAdd(' + i + ')">+ add</button> ' +
+    esc([c.name, c.admin1, c.country].filter(Boolean).join(', ')) + '</div>').join('');
+}
+
+function wxAdd(i) {
+  const c = wxFound[i];
+  if (cfg.cities.length >= maxCities) return toast(maxCities + ' cities max', true);
+  cfg.cities.push({ name: c.name.slice(0, 24), lat: +c.latitude.toFixed(4), lon: +c.longitude.toFixed(4) });
+  $('wxResults').innerHTML = '';
+  $('wxSearch').value = '';
+  renderCities();
+  dirty();
+}
+
+function moveCity(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= cfg.cities.length) return;
+  [cfg.cities[i], cfg.cities[j]] = [cfg.cities[j], cfg.cities[i]];
+  renderCities();
+  dirty();
+}
+
+function delCity(i) {
+  cfg.cities.splice(i, 1);
+  renderCities();
+  dirty();
+}
+
+function renderCities() {
+  const n = cfg.cities.length;
+  $('cities').innerHTML = n ? cfg.cities.map((c, i) => `
+    <div class="feed">
+      <div class="head">
+        <b>${esc(c.name)}</b>
+        <button class="x" title="move up"   onclick="moveCity(${i},-1)" ${i === 0 ? 'disabled' : ''}>&uarr;</button>
+        <button class="x" title="move down" onclick="moveCity(${i},1)" ${i === n - 1 ? 'disabled' : ''}>&darr;</button>
+        <button class="x" title="remove" onclick="delCity(${i})">x</button>
+      </div>
+      <label>Name on the panel</label>
+      <input value="${esc(c.name)}" maxlength="24" oninput="cfg.cities[${i}].name = this.value">
+      <p class="hint">${c.lat.toFixed(2)}, ${c.lon.toFixed(2)}</p>
+    </div>`).join('')
+    : '<p class="hint">No cities yet - search for one above.</p>';
+}
+
+// What the device last fetched, so it can be checked against the panel.
+const WMO = { 0: 'clear', 1: 'mainly clear', 2: 'partly cloudy', 3: 'overcast', 45: 'fog', 48: 'fog',
+  51: 'drizzle', 53: 'drizzle', 55: 'drizzle', 56: 'freezing drizzle', 57: 'freezing drizzle',
+  61: 'rain', 63: 'rain', 65: 'heavy rain', 66: 'freezing rain', 67: 'freezing rain',
+  71: 'snow', 73: 'snow', 75: 'heavy snow', 77: 'snow grains', 80: 'showers', 81: 'showers',
+  82: 'heavy showers', 85: 'snow showers', 86: 'snow showers', 95: 'thunderstorm',
+  96: 'thunder and hail', 99: 'thunder and hail' };
+
+async function loadWeather() {
+  let w;
+  try { w = await api('/api/weather'); } catch (e) { return; }
+  const u = w.units === 'f' ? '&deg;F' : '&deg;C';
+  $('wxNow').innerHTML = (w.cities || []).length
+    ? '<label>On the device now</label>' + w.cities.map(c => '<p class="hint">' + esc(c.name) + ': ' +
+        (c.valid ? Math.round(c.temp) + u + ', ' + (WMO[c.code] || 'code ' + c.code) +
+                   (c.days && c.days.length ? ', today ' + c.days[0].hi + ' / ' + c.days[0].lo : '')
+                 : 'not fetched yet - saved cities are fetched within a few seconds') + '</p>').join('')
+    : '';
+}
+
 function themeControls() {
   document.querySelectorAll('.forSnow')
           .forEach(el => el.classList.toggle('hide', $('theme').value !== 'snow'));
@@ -820,6 +972,9 @@ async function saveConfig() {
   cfg.brightness = +$('brightness').value;
   cfg.mode         = $('mode').value;
   cfg.theme        = $('theme').value;
+  cfg.show         = $('show').value;
+  cfg.weatherUnits = $('weatherUnits').value;
+  cfg.weatherSec   = +$('weatherSec').value || 8;
   cfg.dwellSec   = +$('dwellSec').value;
   cfg.scrollSpeed = +$('scrollSpeed').value;
   cfg.pauseSec   = +$('pauseSec').value;
@@ -853,6 +1008,7 @@ async function saveConfig() {
 
   try {
     await api('/api/config', { method:'POST', body: JSON.stringify(cfg) });
+    setTimeout(loadWeather, 5000);   // a new city is fetched within a few seconds
     snapshotFeeds();
     dirty(false);
     renderFeeds();
@@ -1038,12 +1194,12 @@ async function forget() {
 // Everything Save stores. Editing any of it - here or in any feed row, rows
 // added later included - raises the save bar. Live-only controls (palette,
 // panel test screens, fetching, the API key with its own button) do not.
-const PERSISTED = ['brightness', 'mode', 'theme', 'scrollSpeed', 'pauseSec', 'dwellSec',
-                   'refreshSec', 'rotate180', 'wifiSleepCfg'];
+const PERSISTED = ['brightness', 'mode', 'theme', 'show', 'scrollSpeed', 'pauseSec', 'dwellSec',
+                   'refreshSec', 'rotate180', 'wifiSleepCfg', 'weatherUnits', 'weatherSec'];
 
 function onEdit(e) {
   const t = e.target;
-  if (PERSISTED.includes(t.id) || t.closest('#feeds')) dirty();
+  if (PERSISTED.includes(t.id) || t.closest('#feeds') || t.closest('#cities')) dirty();
 }
 document.addEventListener('input',  onEdit, true);
 document.addEventListener('change', onEdit, true);
@@ -1053,7 +1209,7 @@ document.addEventListener('change', onEdit, true);
 // The tab lives in the URL hash, so a reload lands back on it and a link can
 // point at one. Every Save saves the whole config, so edits on one tab are
 // kept whichever tab's button is pressed.
-const TABS = ['tickers', 'display', 'settings'];
+const TABS = ['tickers', 'weather', 'display', 'settings'];
 let setupShown = false;
 
 function showTab(t) {
@@ -1063,6 +1219,7 @@ function showTab(t) {
     document.querySelector('.tabs [data-tab="' + n + '"]').classList.toggle('on', n === t);
   }
   if (location.hash !== '#' + t) history.replaceState(null, '', '#' + t);
+  if (t === 'weather' && cfg && cfg.cities) loadWeather();
 }
 
 // ---------------------------------------------------------------- boot

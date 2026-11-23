@@ -20,6 +20,7 @@ void setup()
   // therefore takes that mutex. The other way round it takes a null handle and
   // the boot hangs with the panel dark.
   marketBegin();
+  weatherBegin();
   configBegin();
 
   // Before netBegin, so the boot splash is up during the join rather than the

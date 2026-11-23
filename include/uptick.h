@@ -3,9 +3,11 @@
 #include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.25.1"
+#define UPTICK_VERSION   "0.26.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
+#define UPTICK_MAX_CITIES 8
+#define UPTICK_WX_DAYS    7
 
 // One chart point per panel column, so nothing ever needs resampling.
 #define UPTICK_MAX_POINTS 64
@@ -19,6 +21,15 @@ struct Feed
   String  label;     // what the panel shows, e.g. "BTC"
   String  interval;  // candle width for the chart, e.g. "1h"
   uint8_t decimals;  // price decimals; 0 = pick from magnitude
+};
+
+// A place to show the weather for. Coordinates come from the web page's city
+// search; name is what the panel shows and can be edited.
+struct City
+{
+  String name;
+  float  lat;
+  float  lon;
 };
 
 struct Config
@@ -35,6 +46,14 @@ struct Config
   uint16_t refreshSec;   // market data poll interval, per feed
   uint8_t  feedCount;
   Feed     feeds[UPTICK_MAX_FEEDS];
+
+  // "tickers" | "both" | "weather". With "both" the weather screens play once
+  // after every full pass of the tickers; with "weather" they are all there is.
+  String   show;
+  String   weatherUnits; // "c" | "f"
+  uint8_t  weatherSec;   // seconds each weather screen stays up
+  uint8_t  cityCount;
+  City     cities[UPTICK_MAX_CITIES];
 };
 
 extern Config g_cfg;
@@ -139,6 +158,52 @@ bool marketProbeYahoo(const String& symbol, float& price, String& name, String& 
 // so this is one request per twenty tickers rather than one each. False only
 // when Yahoo could not be asked.
 bool marketCheckYahoo(const String* syms, uint8_t n, bool* found);
+
+// ---------------------------------------------------------------- weather
+
+// One day of a city's forecast. Temperatures are rounded to whole degrees in
+// the configured unit; code is the WMO weather code Open-Meteo reports.
+struct WeatherDay
+{
+  uint8_t code;
+  int8_t  hi;
+  int8_t  lo;
+  uint8_t dow;              // 0 = Sunday, in the city's own time zone
+};
+
+struct CityWeather
+{
+  bool       valid     = false;
+  uint32_t   fetchedMs = 0;
+  float      temp      = 0;  // now, in the configured unit
+  uint8_t    code      = 0;  // now, WMO code
+  bool       isDay     = true;
+  int32_t    utcOffset = 0;  // seconds, the city's own
+  uint8_t    days      = 0;
+  WeatherDay day[UPTICK_WX_DAYS];
+};
+
+extern CityWeather       g_weather[UPTICK_MAX_CITIES];
+extern SemaphoreHandle_t g_weatherMutex;
+
+// Null-tolerant, like the other two.
+struct WeatherLock
+{
+  WeatherLock()  { if (g_weatherMutex) xSemaphoreTake(g_weatherMutex, portMAX_DELAY); }
+  ~WeatherLock() { if (g_weatherMutex) xSemaphoreGive(g_weatherMutex); }
+};
+
+void weatherBegin();
+
+// Net task. Fetches every city in one request: every 15 minutes, a minute
+// after a failure, and straight away when the cities or the units change -
+// which it notices itself, so config code does not have to tell it.
+void weatherPoll();
+
+// Shared with the weather fetch: the same TLS setup every market request uses.
+class WiFiClientSecure;
+class HTTPClient;
+void marketPrepareClient(WiFiClientSecure& client, HTTPClient& https);
 
 // ---------------------------------------------------------------- net
 
