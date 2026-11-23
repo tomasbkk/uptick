@@ -948,13 +948,13 @@ static const char* const SNOWMAN[DECO_H] = {
 static const char* const TREE[DECO_H] = {
   "...Y...",
   "..YYY..",
-  "..G1G..",
-  ".GGGGG.",
-  "..GG3..",
-  ".G2GGG.",
-  "GGGG1GG",
-  ".GGGGG.",
-  "G3GGG2G",
+  "..P1P..",
+  ".PPPPP.",
+  "..PP3..",
+  ".P2PPP.",
+  "PPPP1PP",
+  ".PPPPP.",
+  "P3PPP2P",
   "...T...",
 };
 
@@ -995,7 +995,11 @@ static uint16_t decoColor(char c, uint8_t twinkle)
     case 'W': return col(255, 255, 255);   // snow
     case 'R': return col(230,  20,  20);   // hat, ornament
     case 'O': return col(255, 120,   0);   // carrot
-    case 'G': return col(  0, 150,  30);   // scarf, branches
+    case 'G': return col(  0, 150,  30);   // scarf
+    // Branches. A pine teal rather than a plain green, which blended into a
+    // rising chart's green fill and trace - the tree is usually standing in
+    // front of one.
+    case 'P': return col(  0, 130, 110);
     case 'T': return col(120,  70,  30);   // arms, trunk
     case 'Y': return col(255, 210,   0);   // star, ornament
     case 'L': return col( 40,  90, 255);   // ornament

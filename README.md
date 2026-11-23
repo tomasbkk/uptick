@@ -322,7 +322,7 @@ Santa flies across every two to five minutes while it snows, the first time 20-4
 
 Unlike the snow he is drawn over everything, after the screen's own content. He is up for a few seconds at a time, and behind the figures he would be mostly hidden. He adds about 0.2 ms to a frame.
 
-Each time a chart comes on screen while it snows, it gets a snowman or a Christmas tree, picked at random, standing on the chart wherever there is room. Both are 7x10 sprites in the same format as Santa; `K` is drawn black rather than left transparent, so the snowman's eyes and buttons do not show the snow behind them, and the tree's three ornaments cycle through red, yellow and blue every 0.6 s so it twinkles.
+Each time a chart comes on screen while it snows, it gets a snowman or a Christmas tree, picked at random, standing on the chart wherever there is room. Both are 7x10 sprites in the same format as Santa; `K` is drawn black rather than left transparent, so the snowman's eyes and buttons do not show the snow behind them, and the tree's three ornaments cycle through red, yellow and blue every 0.6 s so it twinkles. The tree's branches are a pine teal rather than a plain green, which blended into a rising chart's green fill and trace.
 
 - It stands on the lowest ground under its seven columns, so it never floats; where the ground is higher it overlaps the chart, which reads as standing in front of a slope.
 - A spot counts only if the ground under it is no more than 3 rows uneven and its top stays below the price - row 15, the blank row above the chart, at the highest. If nowhere fits, that chart goes without.
