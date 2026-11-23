@@ -1037,7 +1037,7 @@ static void drawDecoration(const int16_t* colY)
 // ---------------------------------------------------------------- weather
 
 // Two screens per city: now - an animated icon, the temperature, today's high
-// and low, the name and the condition - and the week, seven narrow columns of
+// and low, the name and the condition - and the week, five columns of
 // day, icon, high and low. They play once after every full pass of the
 // tickers, or on their own when the tickers are switched off; see the task.
 //
@@ -1314,23 +1314,18 @@ static void drawWeatherWeek(const char* name, const CityWeather& w)
 {
   clearFrame();
 
-  // Seven columns 9 px apart: the small font's two-letter day, a 7x7 icon,
+  // Five columns 12 px apart: the small font's two-letter day, a 7x7 icon,
   // then the high over the low. Today, the first, has its day in the label
   // color.
   //
-  // A column fits two characters with a pixel to spare. A three-character
-  // temperature - -10 and below, or 100 and up - is 11 px and ran straight
-  // into the next day's figure, so a week with one in it shows five days in
-  // 12 px columns instead of seven that collide.
-  bool wide = false;
-  for (uint8_t i = 0; i < w.days && i < UPTICK_WX_DAYS; i++)
-    if (w.day[i].hi < -9 || w.day[i].hi > 99 || w.day[i].lo < -9 || w.day[i].lo > 99) wide = true;
+  // Seven 9 px columns fit too, but only for two-character temperatures: a
+  // third character - -10 and below, or 100 and up - ran straight into the
+  // next day's figure. Twelve leaves room for three with a gap, so every city
+  // gets the same five days whatever its climate.
+  const int16_t pitch = 12;
+  const int16_t left  = 2;
 
-  const uint8_t days  = wide ? 5 : UPTICK_WX_DAYS;
-  const int16_t pitch = wide ? 12 : 9;
-  const int16_t left  = wide ? 2 : 1;
-
-  for (uint8_t i = 0; i < w.days && i < days; i++)
+  for (uint8_t i = 0; i < w.days; i++)
   {
     const WeatherDay& d = w.day[i];
     const int16_t     x = left + i * pitch;

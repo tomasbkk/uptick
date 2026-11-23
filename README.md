@@ -6,7 +6,7 @@ A desk ticker for crypto and stock prices on a 64x32 RGB LED panel, driven by an
 - **Crypto and stocks:** Binance, Coinbase and CoinGecko for crypto; Yahoo Finance for stocks, ETFs, indices, futures and currencies, with pre-market and after-hours prices
 - **Up to 32 feeds**, checked against their source before they are saved, reorderable, and exportable to a file
 - **Flicker-free** DMA-driven display with hardware brightness and a tunable color palette
-- **Weather:** current conditions with an animated icon and a 7-day forecast for up to 8 cities, between passes of the tickers or on their own
+- **Weather:** current conditions with an animated icon and a 5-day forecast for up to 8 cities, between passes of the tickers or on their own
 - **Christmas theme:** falling snow that settles on the chart, a snowman or a tree, and Santa flying past now and then
 
 ## What you need
@@ -143,7 +143,7 @@ On the **Weather** tab:
 5. Press **Save**. The device fetches the new cities within a few seconds, and the tab shows what it got.
 6. On the **Display** tab, set **Show** to **tickers and weather** or **weather only**.
 
-Each city gets two screens: **now** - an animated icon, the temperature, today's high and low behind the up and down triangles, the city and the conditions - and **the week**, seven columns of day, icon, high and low, with today first. With **tickers and weather** the weather screens for every city play once after each full pass through the tickers: after the last feed's turn on the chart, when the vertical list wraps back to the top, or when the horizontal tape has run through every feed and scrolled off. **Weather only** shows nothing else, and stops fetching prices.
+Each city gets two screens: **now** - an animated icon, the temperature, today's high and low behind the up and down triangles, the city and the conditions - and **the week**, five columns of day, icon, high and low, with today first. With **tickers and weather** the weather screens for every city play once after each full pass through the tickers: after the last feed's turn on the chart, when the vertical list wraps back to the top, or when the horizontal tape has run through every feed and scrolled off. **Weather only** shows nothing else, and stops fetching prices.
 
 ### Choosing a layout
 
@@ -568,20 +568,20 @@ Every screen starts by clearing the whole buffer, which matters here: the back b
 
 ## Weather
 
-Forecasts come from [Open-Meteo](https://open-meteo.com/), which needs no key and no account, like the rest of the default sources. One request covers every city: `latitude` and `longitude` take comma-separated lists, and the answer is a JSON array with one object per city in the same order - a single city comes back as a bare object, which the parser handles too. `timezone=auto` gives each city its own local days, so a forecast for Bangkok starts on Bangkok's today. Seven days for one city is about 800 bytes, so it is parsed with ArduinoJson behind a filter rather than streamed by hand like the candles.
+Forecasts come from [Open-Meteo](https://open-meteo.com/), which needs no key and no account, like the rest of the default sources. One request covers every city: `latitude` and `longitude` take comma-separated lists, and the answer is a JSON array with one object per city in the same order - a single city comes back as a bare object, which the parser handles too. `timezone=auto` gives each city its own local days, so a forecast for Bangkok starts on Bangkok's today. Five days for one city is about 650 bytes, so it is parsed with ArduinoJson behind a filter rather than streamed by hand like the candles.
 
 ```
 https://api.open-meteo.com/v1/forecast?latitude=13.754,49.061&longitude=100.501,20.298
   &current=temperature_2m,weather_code,is_day
   &daily=weather_code,temperature_2m_max,temperature_2m_min
-  &timezone=auto&forecast_days=7
+  &timezone=auto&forecast_days=5
 ```
 
 `weatherPoll()` runs on the net task beside `marketPoll()`. It fetches every 15 minutes - Open-Meteo only updates current conditions that often - a minute after a failure, and at once when the cities or the units change. It notices that itself by comparing the units and every coordinate against what the data on hand was fetched for, and drops that data straight away when they differ, so a reordered list never shows one city's weather under another's name. With **Show** on tickers only it fetches nothing.
 
 City search runs in the browser against Open-Meteo's geocoder, which sends a CORS header, so the device is not involved until the list is saved. Cities are stored in the config as `cities`, each a `name` (at most 24 characters) with `lat` and `lon`, alongside `show` (`tickers`, `both` or `weather`), `weatherUnits` (`c` or `f`) and `weatherSec`. As with the theme, unknown values load as defaults and nonsense coordinates are skipped rather than failing the document.
 
-Conditions are WMO weather codes, grouped into eight kinds for drawing: clear, partly cloudy, cloudy, fog, drizzle, rain, snow and thunder. The now screen's icons are animated at 20 fps - the sun's rays alternate, the moon's stars twinkle in turn, clouds drift, rain, drizzle and snow fall at their own speeds with every column out of step, and thunder flashes - and the week's are 7x7 and still. The week screen's 9 px columns fit two characters with a pixel to spare; a three-character temperature, -10 and below or 100 and up, ran straight into the next day's figure, so a week with one in it shows five days in 12 px columns instead of seven that collide. The temperature is in the same bold font as the boot logo; the colors are the weather's own rather than palette entries, like Santa's. Night is Open-Meteo's `is_day`, so the moon appears at the city's own sunset.
+Conditions are WMO weather codes, grouped into eight kinds for drawing: clear, partly cloudy, cloudy, fog, drizzle, rain, snow and thunder. The now screen's icons are animated at 20 fps - the sun's rays alternate, the moon's stars twinkle in turn, clouds drift, rain, drizzle and snow fall at their own speeds with every column out of step, and thunder flashes - and the week's are 7x7 and still. The week screen shows five days in 12 px columns. Seven 9 px columns fit as well, but only two characters each: a three-character temperature, -10 and below or 100 and up, ran straight into the next day's figure. Five days fit three characters with a gap, so every city gets the same week whatever its climate. The temperature is in the same bold font as the boot logo; the colors are the weather's own rather than palette entries, like Santa's. Night is Open-Meteo's `is_day`, so the moon appears at the city's own sunset.
 
 The weather joins the tickers through two flags. Each ticker sets `s_lapDone` at the end of a full pass, and the task then plays every city's two screens and returns. The chart's pass ends with its last feed's turn, and the vertical list's when it wraps to the top; a vertical list of two or fewer does not move, so its pass is a dwell. The horizontal tape has no natural end, so it is given one: when the top row has fed in its last feed, `s_tickDrain` stops both rows taking more, and the pass ends once the tape has scrolled off empty. It restarts full from the left afterwards, through the same reset as choosing the mode. The test screens are never interrupted.
 

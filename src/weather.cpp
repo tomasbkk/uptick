@@ -10,7 +10,7 @@
 // city comes back as a bare object). timezone=auto gives each city its own
 // local days, so a forecast for Bangkok starts on Bangkok's today.
 //
-// About 800 bytes per city for seven days, so it is parsed with ArduinoJson
+// About 650 bytes per city for five days, so it is parsed with ArduinoJson
 // behind a filter rather than streamed by hand like the candle responses.
 
 CityWeather       g_weather[UPTICK_MAX_CITIES];
@@ -86,7 +86,7 @@ static bool fetchAll(const String& units, uint8_t n, const float* lat, const flo
   for (uint8_t i = 0; i < n; i++) url += String(lon[i], 4) + (i + 1 < n ? "," : "");
   url += "&current=temperature_2m,weather_code,is_day"
          "&daily=weather_code,temperature_2m_max,temperature_2m_min"
-         "&timezone=auto&forecast_days=7";
+         "&timezone=auto&forecast_days=" + String(UPTICK_WX_DAYS);
   if (units == "f") url += "&temperature_unit=fahrenheit";
 
   WiFiClientSecure client;

@@ -3,11 +3,11 @@
 #include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.26.0"
+#define UPTICK_VERSION   "0.26.1"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 #define UPTICK_MAX_CITIES 8
-#define UPTICK_WX_DAYS    7
+#define UPTICK_WX_DAYS    5
 
 // One chart point per panel column, so nothing ever needs resampling.
 #define UPTICK_MAX_POINTS 64
