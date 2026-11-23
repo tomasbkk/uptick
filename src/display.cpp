@@ -2260,6 +2260,9 @@ static uint8_t  s_snX[SN_MAX], s_snY[SN_MAX];      // a ring, the head at s_snHe
 static int16_t  s_snHead = 0, s_snLen = 0, s_snGrow = 0;
 static int8_t   s_snDx = 1, s_snDy = 0;
 static uint8_t  s_snFx = 0, s_snFy = 0;
+static uint32_t s_snFoodAt = 0;                     // when the mushroom appeared
+static const uint32_t SN_FOOD_MS  = 20000;          // uneaten this long, it moves
+static const uint32_t SN_BLINK_MS = 2000;           // and blinks for this long first
 static float    s_snAcc = 0;
 static uint32_t s_snLastUs = 0, s_snDeadAt = 0;
 static bool     s_snakeLive = false;               // a game is under way, to carry on with
@@ -2317,16 +2320,31 @@ static bool snakeBody(int16_t x, int16_t y)
   return false;
 }
 
+// Somewhere free for the next mushroom - and not tucked into a corner or a
+// pocket of a digit, meaning walled on two sides or more. The snake can reach
+// those, but its space check rightly refuses to squeeze into a one-cell gap,
+// so it would circle a mushroom there for good. If no open spot turns up, any
+// free one will do; the timeout in clockSnake moves it on if that one, or one
+// the snake has walled off with its own body, cannot be reached.
 static void snakeFood(const int8_t* d)
 {
+  int16_t fx = -1, fy = -1;
   for (uint16_t tries = 0; tries < 500; tries++)
   {
     const int16_t x = (int16_t)rnd(0, SN_W - 0.01f), y = (int16_t)rnd(0, SN_H - 0.01f);
     if (snakeWall(x, y, d) || snakeBody(x, y)) continue;
-    s_snFx = x;
-    s_snFy = y;
-    return;
+    if (fx < 0) { fx = x; fy = y; }       // the fallback: free, if not open
+
+    const uint8_t walls = snakeWall((x + 1) % SN_W, y, d) + snakeWall((x + SN_W - 1) % SN_W, y, d) +
+                          snakeWall(x, (y + 1) % SN_H, d) + snakeWall(x, (y + SN_H - 1) % SN_H, d);
+    if (walls >= 2) continue;
+    fx = x; fy = y;
+    break;
   }
+  if (fx < 0) return;
+  s_snFx     = fx;
+  s_snFy     = fy;
+  s_snFoodAt = millis();
 }
 
 // A new snake of four, heading right along a row clear of the digits.
@@ -2440,6 +2458,10 @@ static void __attribute__((noinline)) clockSnake(const ClockTime& ct)
   // A new minute can drop a digit onto the mushroom: move the mushroom.
   if (snakeWall(s_snFx, s_snFy, d)) snakeFood(d);
 
+  // Uneaten for too long: the snake cannot get to it, so it moves on.
+  uint32_t foodAge = millis() - s_snFoodAt;
+  if (foodAge > SN_FOOD_MS) { snakeFood(d); foodAge = 0; }
+
   if (s_snDeadAt)
   {
     // Flashes for a second and a half, then a new snake.
@@ -2467,9 +2489,14 @@ static void __attribute__((noinline)) clockSnake(const ClockTime& ct)
     for (int16_t x = 0; x < SN_W; x++)
       if (snakeWall(x, y, d)) matrix->fillRect(x * 2, y * 2, 2, 2, wall);
 
-  // The mushroom: a red cap over a pale stem, one cell.
-  matrix->drawFastHLine(s_snFx * 2, s_snFy * 2,     2, col(230, 30, 30));
-  matrix->drawFastHLine(s_snFx * 2, s_snFy * 2 + 1, 2, col(240, 210, 160));
+  // The mushroom: a red cap over a pale stem, one cell. It blinks for its
+  // last two seconds before it moves.
+  const bool hidden = foodAge > SN_FOOD_MS - SN_BLINK_MS && ((foodAge / 200) & 1);
+  if (!hidden)
+  {
+    matrix->drawFastHLine(s_snFx * 2, s_snFy * 2,     2, col(230, 30, 30));
+    matrix->drawFastHLine(s_snFx * 2, s_snFy * 2 + 1, 2, col(240, 210, 160));
+  }
 
   // The snake, bright at the head and darker toward the tail - or, dead,
   // flashing red and white.
