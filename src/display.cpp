@@ -2096,14 +2096,23 @@ static void __attribute__((noinline)) clockAnalog(const ClockTime& ct)
 
 // ---------------------------------------------------------------- platformer
 
-// A little plumber in a red cap runs in along a brick ground, jumps and hits
-// a "?" box with his head; a mushroom rises out of it, slides off and drops,
-// and he chases it down and grows - then runs off, and it starts again. The
-// art is drawn for this clock in the style of the old platform games, not
-// copied from any of them.
+// A little side-scroller. A plumber in a red cap runs on the spot while the
+// ground, the hills behind it and the clouds scroll past at their own speeds.
+// While he is small "?" boxes come along: he jumps and hits one with his
+// head, a mushroom rises out of it, slides off and drops onto him, and he
+// grows. While he is big turtles walk at him instead: mostly he jumps and
+// stomps one - it turns into a shell and is kicked off the edge - but about
+// one time in three it gets him, and he flickers and goes small again, and
+// the boxes start coming.
 //
-// Each round is a script played from its start time, every position worked
-// out from the seconds into it, so the frame rate cannot change its pace.
+// Nothing is scripted to the second: each thing runs on simple physics -
+// gravity, and jumps timed from how fast the box or turtle is coming - so it
+// plays out a little differently every time. The art is drawn for this clock
+// in the style of the old platform games, not copied from any of them.
+//
+// Positions are screen columns. Everything in the world moves left at the
+// scroll speed; the plumber stays at PL_HX, far enough right that what pops
+// out of a box clears the clock in the top left.
 static const char* const PL_SMALL[2][8] = {
   { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".SSSSSSS", "..RBBR..", ".BBBBBB.", ".BB..BB.", "KK....KK" },
   { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".SSSSSSS", "..RBBR..", "..BBBB..", "..BBBB..", "..KKKK.." },
@@ -2123,6 +2132,14 @@ static const char* const PL_QBOX[8] = {
 static const char* const PL_USED[8] = {
   ".DDDDDD.", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", ".DDDDDD.",
 };
+static const char* const PL_TURTLE[2][10] = {   // walking left
+  { ".AA.....", "AEAA....", "AAAA....", ".AA.GGG.", "..AGGVGG", "..GVGGVG", "..GGGVGG", "..VVVVVV", "..AA..AA", ".AA...AA" },
+  { ".AA.....", "AEAA....", "AAAA....", ".AA.GGG.", "..AGGVGG", "..GVGGVG", "..GGGVGG", "..VVVVVV", "...AAAA.", "...AA.AA" },
+};
+static const char* const PL_SHELL[6] = {
+  "..GGGG..", ".GVGGVG.", "GGGVVGGG", "GVGGGGVG", "VVVVVVVV", ".V....V.",
+};
+static const char* const PL_CLOUD[3] = { "..CCC...", ".CCCCCC.", "CCCCCCCC" };
 
 static uint16_t plColor(char c)
 {
@@ -2139,6 +2156,10 @@ static uint16_t plColor(char c)
     case 'Q': return col(250, 160,   0);   // box
     case 'D': return col(130,  60,  10);   // box edge
     case 'U': return col(150,  80,  30);   // spent box
+    case 'A': return col(240, 200,  80);   // turtle skin
+    case 'G': return col( 20, 170,  40);   // shell
+    case 'V': return col(240, 240, 220);   // shell rim and markings
+    case 'C': return col( 90,  95, 110);   // cloud
   }
   return 0;
 }
@@ -2155,81 +2176,246 @@ static void plSprite(int16_t x, int16_t y, const char* const* rows, uint8_t h)
     }
 }
 
-static uint32_t s_plStart = 0;
+static const int16_t PL_FLOOR = 28;       // first row of the ground
+static const int16_t PL_HX    = 44;       // the plumber's column
+static const int16_t PL_BOX_Y = 8;
+static const float   PL_SCROLL = 20.0f;   // px per second
+static const float   PL_G      = 140.0f;  // gravity, px per second squared
+static const float   PL_TURTLE_V = 8.0f;  // a turtle's own walk, toward him
 
-static const int16_t PL_BOX_X  = 44;
-static const int16_t PL_BOX_Y  = 8;
-static const int16_t PL_FLOOR  = 28;       // first row of the ground
-static const float   PL_RUN    = 18.0f;    // px per second
-static const float   PL_ROUND  = 9.5f;     // seconds, pause included
+struct PlBox    { bool on, spent; float x, bump; };
+struct PlMush   { bool on; float x, y, vy, rise; };
+struct PlTurtle { bool on, shell, stomp, hit; float x, vx; };
+
+static PlBox    s_plBox;
+static PlMush   s_plMush;
+static PlTurtle s_plTurtle;
+static float    s_plScroll, s_plT, s_plHy, s_plVy, s_plChange, s_plInvuln, s_plWait;
+static bool     s_plBig, s_plAir, s_plChangeTo;
+static uint32_t s_plLastUs = 0;
+
+static int16_t plHeight() { return s_plBig ? 16 : 8; }
+
+static void platformerReset()
+{
+  memset(&s_plBox, 0, sizeof(s_plBox));
+  memset(&s_plMush, 0, sizeof(s_plMush));
+  memset(&s_plTurtle, 0, sizeof(s_plTurtle));
+  s_plScroll = s_plT = 0;
+  s_plBig    = false;
+  s_plHy     = PL_FLOOR - 8;
+  s_plVy     = 0;
+  s_plAir    = false;
+  s_plChange = s_plInvuln = 0;
+  s_plWait   = 1.0f;
+  s_plLastUs = micros();
+}
+
+// A jump that peaks h rows up.
+static void plJump(float h)
+{
+  s_plVy  = -sqrtf(2 * PL_G * h);
+  s_plAir = true;
+}
+
+static void plStep(float dt)
+{
+  s_plT      += dt;
+  s_plScroll += PL_SCROLL * dt;
+  if (s_plScroll > 100000.0f) s_plScroll -= 100000.0f;   // keep the float precise
+
+  // What comes next: a box while he is small, a turtle while he is big, a
+  // second or two after the last thing has gone.
+  if (!s_plBox.on && !s_plMush.on && !s_plTurtle.on && s_plChange <= 0)
+  {
+    s_plWait -= dt;
+    if (s_plWait <= 0)
+    {
+      if (!s_plBig)
+      {
+        s_plBox = { true, false, 70, 0 };
+      }
+      else
+      {
+        s_plTurtle = { true, false, rnd(0, 1) < 0.67f, false, 70, 0 };
+      }
+      s_plWait = rnd(1.0f, 2.5f);
+    }
+  }
+
+  // The plumber.
+  if (s_plAir)
+  {
+    s_plVy += PL_G * dt;
+    s_plHy += s_plVy * dt;
+    if (s_plHy >= PL_FLOOR - plHeight()) { s_plHy = PL_FLOOR - plHeight(); s_plVy = 0; s_plAir = false; }
+  }
+  if (s_plChange > 0)
+  {
+    s_plChange -= dt;
+    if (s_plChange <= 0)
+    {
+      s_plBig = s_plChangeTo;
+      if (!s_plAir) s_plHy = PL_FLOOR - plHeight();
+    }
+  }
+  if (s_plInvuln > 0) s_plInvuln -= dt;
+
+  // The box. He jumps so the top of the jump meets it: the climb to five
+  // rows up takes sqrt(2h/g), in which the box covers that much ground.
+  PlBox& b = s_plBox;
+  if (b.on)
+  {
+    b.x -= PL_SCROLL * dt;
+    if (b.bump > 0) b.bump -= dt;
+    if (!b.spent && !s_plAir && b.x <= PL_HX + PL_SCROLL * sqrtf(2 * 5 / PL_G) && b.x > PL_HX - 4)
+      plJump(5);
+    if (!b.spent && s_plVy < 0 && s_plHy <= PL_BOX_Y + 8 && fabsf(b.x - PL_HX) < 7)
+    {
+      b.spent = true;
+      b.bump  = 0.15f;
+      s_plVy  = 0;
+      s_plHy  = PL_BOX_Y + 8;
+      s_plMush = { true, b.x, (float)PL_BOX_Y, 0, 0.5f };
+    }
+    if (b.x < -10) b.on = false;
+  }
+
+  // The mushroom: rises out of the box with it, then heads right through
+  // the world a little faster than it scrolls, slides off the box and drops.
+  PlMush& m = s_plMush;
+  if (m.on)
+  {
+    if (m.rise > 0)
+    {
+      m.rise -= dt;
+      if (b.on) m.x = b.x;
+      float f = 1.0f - m.rise / 0.5f;
+      if (f > 1) f = 1;
+      m.y = PL_BOX_Y - 8 * f;
+    }
+    else
+    {
+      m.x += (30.0f - PL_SCROLL) * dt;
+      const bool onBox = b.on && fabsf(m.x - b.x) < 8 && m.y <= PL_BOX_Y - 8 + 0.5f;
+      if (onBox) { m.y = PL_BOX_Y - 8; m.vy = 0; }
+      else
+      {
+        m.vy += PL_G * dt;
+        m.y  += m.vy * dt;
+        if (m.y >= PL_FLOOR - 8) { m.y = PL_FLOOR - 8; m.vy = 0; }
+      }
+      if (fabsf(m.x - PL_HX) < 7 && m.y + 8 > s_plHy && m.y < s_plHy + plHeight())
+      {
+        m.on = false;
+        if (!s_plBig) { s_plChange = 0.8f; s_plChangeTo = true; }
+      }
+      else if (m.x > 70 || m.x < -10) m.on = false;
+    }
+  }
+
+  // The turtle, walking at him on top of the scroll. For a stomp he jumps
+  // when it is as far off as it will cover during the jump - a jump twelve
+  // rows high is in the air for 2 sqrt(2h/g) - and comes down on its shell.
+  PlTurtle& tu = s_plTurtle;
+  if (tu.on)
+  {
+    if (!tu.shell)
+    {
+      tu.x -= (PL_SCROLL + PL_TURTLE_V) * dt;
+      const float air = 2 * sqrtf(2 * 12 / PL_G);
+      if (tu.stomp && !s_plAir && s_plChange <= 0 &&
+          tu.x - PL_HX <= (PL_SCROLL + PL_TURTLE_V) * air * 0.92f && tu.x > PL_HX)
+        plJump(12);
+
+      const float ty   = PL_FLOOR - 10;
+      const float feet = s_plHy + plHeight();
+      const bool  over = fabsf(tu.x - PL_HX) < 7;
+      if (over && s_plAir && s_plVy > 0 && feet >= ty && feet <= ty + 6)
+      {
+        tu.shell = true;                     // stomped: a shell, kicked away
+        tu.vx    = 60;
+        s_plVy   = -35;
+        s_plAir  = true;
+      }
+      else if (over && !tu.hit && s_plInvuln <= 0 && feet > ty + 2)
+      {
+        tu.hit = true;                       // it got him
+        if (s_plBig) { s_plChange = 0.8f; s_plChangeTo = false; s_plInvuln = 2.0f; }
+      }
+    }
+    else
+    {
+      tu.x += tu.vx * dt;
+    }
+    if (tu.x < -10 || tu.x > 70) tu.on = false;
+  }
+}
 
 static void __attribute__((noinline)) clockPlatformer(const ClockTime& ct)
 {
-  float t = (millis() - s_plStart) / 1000.0f;
-  if (t >= PL_ROUND) { s_plStart = millis(); t = 0; }
+  plStep(clockDt(s_plLastUs));
 
-  // The script. Small, he is 8 rows tall and stands at y 20; big, 16 and 12.
-  const float HIT = 3.2f;                   // head meets the box
-  bool    big   = false;
-  bool    run   = false;
-  int16_t hx    = -8, hy = PL_FLOOR - 8;
-  if (t < 2.9f)       { hx = (int16_t)(-8 + PL_RUN * t); run = true; }
-  else if (t < 3.5f)  { hx = PL_BOX_X; hy -= (int16_t)lroundf(4 * sinf((t - 2.9f) / 0.6f * 3.1416f)); }
-  else if (t < 5.4f)  { hx = PL_BOX_X; }
-  else if (t < 5.86f) { hx = (int16_t)(PL_BOX_X + PL_RUN * (t - 5.4f)); run = true; }
-  else if (t < 6.76f)
+  // Hills behind, at half the scroll, and two clouds at a quarter.
+  for (int16_t x = 0; x < PANEL_W; x++)
   {
-    // Caught it: flickering between sizes, as growing goes in these games.
-    hx  = 52;
-    big = ((int)((t - 5.86f) / 0.1f)) & 1;
+    const int16_t h = (int16_t)(3 + 2 * sinf((x + s_plScroll * 0.5f) / 7.0f));
+    matrix->drawFastVLine(x, PL_FLOOR - h, h, col(0, 60, 20));
   }
-  else                { hx = (int16_t)(52 + PL_RUN * (t - 6.76f)); big = true; run = true; }
-
-  // The box: bumped up two rows just after the hit, spent from then on.
-  const bool    spent = t >= HIT;
-  const int16_t boxY  = (t >= HIT && t < HIT + 0.15f) ? PL_BOX_Y - 2 : PL_BOX_Y;
-
-  // The mushroom: rises out of the box top, slides off its right edge,
-  // drops to the ground and keeps going, until he catches it.
-  bool    mush = false;
-  int16_t mx = PL_BOX_X, my = PL_BOX_Y;
-  if (t >= HIT && t < 5.86f)
+  static const float CLOUDS[2] = { 10, 45 };
+  for (float c0 : CLOUDS)
   {
-    mush = true;
-    if (t < 3.8f)       { my = PL_BOX_Y - (int16_t)(8 * (t - HIT) / 0.6f); }
-    else if (t < 4.8f)  { my = PL_BOX_Y - 8; mx = (int16_t)(PL_BOX_X + 8 * (t - 3.8f)); }
-    else if (t < 5.3f)  { const float f = (t - 4.8f) / 0.5f;
-                          my = PL_BOX_Y - 8 + (int16_t)((PL_FLOOR - 8 - (PL_BOX_Y - 8)) * f * f);
-                          mx = (int16_t)(52 + 8 * (t - 4.8f)); }
-    else                { my = PL_FLOOR - 8; mx = (int16_t)(56 + 8 * (t - 5.3f)); }
+    float v = fmodf(c0 - s_plScroll * 0.25f, 80.0f);
+    if (v < 0) v += 80.0f;
+    plSprite((int16_t)v - 10, 3, PL_CLOUD, 3);
   }
 
-  // The time first, so the mushroom rises in front of nothing and the
-  // plumber passes in front of the date.
-  char hm[8], date[16];
-  clockHM(ct, hm, sizeof(hm), true);
-  clockDate(ct, date, sizeof(date), true);
-  drawBig(2, 1, hm, col(255, 255, 255));
-  drawTiny(2, 10, date, C_DIM());
-
-  // The ground: a band of bricks with mortar lines, staggered row to row.
+  // The ground: a band of bricks, its mortar lines moving with the scroll.
   for (int16_t y = PL_FLOOR; y < PANEL_H; y++) matrix->drawFastHLine(0, y, PANEL_W, col(190, 90, 30));
   matrix->drawFastHLine(0, PL_FLOOR, PANEL_W, col(240, 150, 80));
   matrix->drawFastHLine(0, PL_FLOOR + 2, PANEL_W, col(90, 35, 5));
-  for (int16_t x = 0; x < PANEL_W; x += 8)
+  const int16_t off = (int16_t)s_plScroll % 8;
+  for (int16_t x = -off; x < PANEL_W; x += 8)
   {
-    matrix->drawFastVLine(x, PL_FLOOR, 2, col(90, 35, 5));
-    matrix->drawFastVLine(x + 4, PL_FLOOR + 3, 1, col(90, 35, 5));
+    if (x >= 0) matrix->drawFastVLine(x, PL_FLOOR, 2, col(90, 35, 5));
+    if (x + 4 >= 0 && x + 4 < PANEL_W) matrix->drawFastVLine(x + 4, PL_FLOOR + 3, 1, col(90, 35, 5));
   }
 
-  // The mushroom is drawn before the box, so while it rises it comes out
-  // from behind the box's top edge rather than in front of it.
-  if (mush) plSprite(mx, my, PL_MUSH, 8);
-  plSprite(PL_BOX_X, boxY, spent ? PL_USED : PL_QBOX, 8);
+  // The mushroom before the box, so while it rises it comes out from behind
+  // the box's top edge.
+  if (s_plMush.on) plSprite((int16_t)s_plMush.x, (int16_t)s_plMush.y, PL_MUSH, 8);
+  if (s_plBox.on)
+  {
+    int16_t by = PL_BOX_Y;
+    if (s_plBox.bump > 0) by -= 2;
+    plSprite((int16_t)s_plBox.x, by, s_plBox.spent ? PL_USED : PL_QBOX, 8);
+  }
+  if (s_plTurtle.on)
+  {
+    if (s_plTurtle.shell) plSprite((int16_t)s_plTurtle.x, PL_FLOOR - 6, PL_SHELL, 6);
+    else                  plSprite((int16_t)s_plTurtle.x, PL_FLOOR - 10, PL_TURTLE[(int)(s_plT / 0.2f) & 1], 10);
+  }
 
-  const uint8_t frame = run ? ((uint8_t)(t / 0.12f) & 1) : 1;
-  if (big) plSprite(hx, PL_FLOOR - 16, PL_BIG[frame], 16);
-  else     plSprite(hx, hy, PL_SMALL[frame], 8);
+  // The plumber: flickering between sizes while he grows or shrinks, and
+  // blinking while a turtle cannot hurt him again.
+  bool big = s_plBig;
+  if (s_plChange > 0) big = (((int)(s_plChange / 0.1f)) & 1) == (s_plChangeTo ? 0 : 1);
+  const bool blinkOff = s_plInvuln > 0 && (((int)(s_plT / 0.08f)) & 1);
+  if (!blinkOff)
+  {
+    const uint8_t step = ((int)(s_plT / 0.12f)) & 1;
+    int16_t top = (int16_t)s_plHy;
+    if (s_plChange > 0) top = PL_FLOOR - (big ? 16 : 8);
+    if (big) plSprite(PL_HX, top, PL_BIG[s_plAir ? 1 : step], 16);
+    else     plSprite(PL_HX, top, PL_SMALL[s_plAir ? 0 : step], 8);
+  }
+
+  // The time on top, outlined, so whatever scrolls behind it stays clear.
+  char hm[8], date[16];
+  clockHM(ct, hm, sizeof(hm), true);
+  clockDate(ct, date, sizeof(date), true);
+  drawOutlined(2, 1, hm, 1, col(255, 255, 255));
+  drawTinyOutlined(2, 10, date, col(150, 150, 160));
 }
 
 // ---------------------------------------------------------------- snake
@@ -2558,8 +2744,8 @@ static uint8_t clockThemeIndex(const Config& cfg)
 
 // Starts the themes afresh: called when the clock comes round in the
 // rotation and when the theme changes, so each starts from its beginning
-// rather than mid-animation - Tetris builds its digits, the platformer plays
-// its scene from the top.
+// rather than mid-animation - Tetris builds its digits, the platformer starts
+// small again.
 //
 // Except the games, pong and snake, which are play in progress rather than
 // animations: they carry on where they left off, as if paused while the
@@ -2580,7 +2766,7 @@ static void clockReset(const Config& cfg)
   matrixReset();
   flipReset(ct);
   tetrisReset();
-  s_plStart = millis();
+  platformerReset();
 }
 
 static void drawClock(const Config& cfg)
