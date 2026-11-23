@@ -1222,8 +1222,8 @@ void marketPoll()
     seenRev = g_cfgRev;
   }
 
-  // Weather only: nothing on the panel needs a price, so nothing is fetched.
-  if (cfg.show == "weather") return;
+  // Tickers off: nothing on the panel needs a price, so nothing is fetched.
+  if (!cfg.showTickers) return;
 
   const uint32_t now = millis();
 

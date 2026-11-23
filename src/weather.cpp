@@ -163,7 +163,8 @@ void weatherPoll()
   // hand, that data belongs to a different list and is dropped at once rather
   // than shown under the wrong names.
   static uint32_t seenRev = 0xFFFFFFFF;
-  static String   show, units, sig;
+  static bool     wanted = false;
+  static String   units, sig;
   static uint8_t  n = 0;
   static float    lat[UPTICK_MAX_CITIES], lon[UPTICK_MAX_CITIES];
 
@@ -171,7 +172,9 @@ void weatherPoll()
   {
     CfgLock lk;
     seenRev = g_cfgRev;
-    show    = g_cfg.show;
+    // The clock needs the weather fetch too: it takes its city's UTC offset
+    // from it, which follows daylight saving with no time zone tables.
+    wanted  = g_cfg.showWeather || g_cfg.showClock;
     units   = g_cfg.weatherUnits;
     n       = g_cfg.cityCount;
     sig     = units;
@@ -191,7 +194,7 @@ void weatherPoll()
     s_fetchedSig = "";
   }
 
-  if (show == "tickers" || n == 0) return;
+  if (!wanted || n == 0) return;
 
   const uint32_t now  = millis();
   const uint32_t wait = s_lastOk ? WX_EVERY_MS : WX_RETRY_MS;

@@ -116,6 +116,7 @@
   <nav class="tabs">
     <button data-tab="tickers"  onclick="showTab('tickers')">Tickers</button>
     <button data-tab="weather"  onclick="showTab('weather')">Weather</button>
+    <button data-tab="clock"    onclick="showTab('clock')">Clock</button>
     <button data-tab="display"  onclick="showTab('display')">Display</button>
     <button data-tab="settings" onclick="showTab('settings')">Settings</button>
   </nav>
@@ -171,6 +172,21 @@
     </div>
   </section>
 
+  <section class="tab" id="tab-clock">
+    <div class="card">
+      <h2>Clock</h2>
+      <label>Theme</label>
+      <select id="clockTheme">
+        <option value="matrix">matrix - green rain</option>
+      </select>
+      <label>Time zone</label>
+      <select id="clockCity"></select>
+      <label>Seconds on screen</label>
+      <input id="clockSec" type="number" min="3" max="600">
+      <p class="hint">The time zone is one of your weather cities', so daylight saving is followed automatically. Seconds on screen is how long the clock stays up between the other parts; on its own it stays up for good. Turn the clock on with <b>Show</b> on the Display tab.</p>
+    </div>
+  </section>
+
   <section class="tab" id="tab-display">
     <div class="card">
       <h2>Display</h2>
@@ -178,12 +194,12 @@
       <input type="range" id="brightness" min="1" max="100" oninput="liveBrightness()">
 
       <label>Show</label>
-      <select id="show" onchange="liveShow()">
-        <option value="tickers">tickers only</option>
-        <option value="both">tickers and weather</option>
-        <option value="weather">weather only</option>
-      </select>
-      <p class="hint forBoth">The weather screens play once after every full pass through the tickers. Weather only stops price fetching altogether.</p>
+      <div class="lv">
+        <label><input type="checkbox" id="showTickers" onchange="liveShow(this)"> tickers</label>
+        <label><input type="checkbox" id="showWeather" onchange="liveShow(this)"> weather</label>
+        <label><input type="checkbox" id="showClock"   onchange="liveShow(this)"> clock</label>
+      </div>
+      <p class="hint">The panel goes through whatever is ticked, in this order. With the tickers on, the weather and the clock play once after every full pass through them. With the tickers off, prices are not fetched at all; one thing on its own just stays up.</p>
 
       <label>Mode</label>
       <select id="mode" onchange="liveMode()">
@@ -413,12 +429,16 @@ async function loadConfig() {
   if (!$('mode').value) $('mode').value = 'single_chart';
   $('theme').value       = cfg.theme === 'snow' ? 'snow' : 'none';
   themeControls();
-  $('show').value         = ['both', 'weather'].includes(cfg.show) ? cfg.show : 'tickers';
-  showControls();
+  $('showTickers').checked = cfg.showTickers !== false;
+  $('showWeather').checked = !!cfg.showWeather;
+  $('showClock').checked   = !!cfg.showClock;
+  $('clockTheme').value    = 'matrix';
+  $('clockSec').value      = cfg.clockSec || 10;
   $('weatherUnits').value = cfg.weatherUnits === 'f' ? 'f' : 'c';
   $('weatherSec').value   = cfg.weatherSec || 8;
   cfg.cities = cfg.cities || [];
   renderCities();
+  renderClockCities();
   loadWeather();
   modeControls();
   $('dwellSec').value    = cfg.dwellSec;
@@ -825,17 +845,28 @@ function liveTheme() {
 
 // ---------------------------------------------------------------- weather
 
-// What the panel shows, live like the mode; Save keeps it.
-function liveShow() {
-  showControls();
+// What the panel shows, live like the mode; Save keeps it. At least one has
+// to stay ticked - the device refuses all three off rather than go blank.
+function liveShow(box) {
+  const s = { tickers: $('showTickers').checked, weather: $('showWeather').checked, clock: $('showClock').checked };
+  if (!s.tickers && !s.weather && !s.clock) {
+    box.checked = true;
+    return toast('something has to be on', true);
+  }
   dirty();
-  fetch('/api/show', { method:'POST', body: JSON.stringify({ show: $('show').value }) })
+  fetch('/api/show', { method:'POST', body: JSON.stringify(s) })
     .then(r => { if (!r.ok) toast('could not switch', true); });
 }
 
-function showControls() {
-  document.querySelectorAll('.forBoth')
-          .forEach(el => el.classList.toggle('hide', $('show').value === 'tickers'));
+// The clock's time zone is one of the weather cities'. The list follows the
+// Weather tab as cities are added, removed or renamed.
+function renderClockCities() {
+  const sel = $('clockCity');
+  const cur = sel.options.length ? +sel.value : (cfg.clockCity || 0);   // keep an unsaved pick
+  sel.innerHTML = cfg.cities.length
+    ? cfg.cities.map((c, i) => '<option value="' + i + '">' + esc(c.name) + '</option>').join('')
+    : '<option value="0">UTC - add a city on the Weather tab</option>';
+  sel.value = String(cur < cfg.cities.length ? cur : 0);
 }
 
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -898,10 +929,11 @@ function renderCities() {
         <button class="x" title="remove" onclick="delCity(${i})">x</button>
       </div>
       <label>Name on the panel</label>
-      <input value="${esc(c.name)}" maxlength="24" oninput="cfg.cities[${i}].name = this.value">
+      <input value="${esc(c.name)}" maxlength="24" oninput="cfg.cities[${i}].name = this.value; renderClockCities()">
       <p class="hint">${c.lat.toFixed(2)}, ${c.lon.toFixed(2)}</p>
     </div>`).join('')
     : '<p class="hint">No cities yet - search for one above.</p>';
+  if ($('clockCity')) renderClockCities();
 }
 
 // What the device last fetched, so it can be checked against the panel.
@@ -972,7 +1004,13 @@ async function saveConfig() {
   cfg.brightness = +$('brightness').value;
   cfg.mode         = $('mode').value;
   cfg.theme        = $('theme').value;
-  cfg.show         = $('show').value;
+  cfg.showTickers  = $('showTickers').checked;
+  cfg.showWeather  = $('showWeather').checked;
+  cfg.showClock    = $('showClock').checked;
+  cfg.clockTheme   = $('clockTheme').value;
+  cfg.clockSec     = +$('clockSec').value || 10;
+  cfg.clockCity    = +$('clockCity').value || 0;
+  delete cfg.show;
   cfg.weatherUnits = $('weatherUnits').value;
   cfg.weatherSec   = +$('weatherSec').value || 8;
   cfg.dwellSec   = +$('dwellSec').value;
@@ -1194,8 +1232,9 @@ async function forget() {
 // Everything Save stores. Editing any of it - here or in any feed row, rows
 // added later included - raises the save bar. Live-only controls (palette,
 // panel test screens, fetching, the API key with its own button) do not.
-const PERSISTED = ['brightness', 'mode', 'theme', 'show', 'scrollSpeed', 'pauseSec', 'dwellSec',
-                   'refreshSec', 'rotate180', 'wifiSleepCfg', 'weatherUnits', 'weatherSec'];
+const PERSISTED = ['brightness', 'mode', 'theme', 'showTickers', 'showWeather', 'showClock',
+                   'scrollSpeed', 'pauseSec', 'dwellSec', 'refreshSec', 'rotate180', 'wifiSleepCfg',
+                   'weatherUnits', 'weatherSec', 'clockTheme', 'clockSec', 'clockCity'];
 
 function onEdit(e) {
   const t = e.target;
@@ -1209,7 +1248,7 @@ document.addEventListener('change', onEdit, true);
 // The tab lives in the URL hash, so a reload lands back on it and a link can
 // point at one. Every Save saves the whole config, so edits on one tab are
 // kept whichever tab's button is pressed.
-const TABS = ['tickers', 'weather', 'display', 'settings'];
+const TABS = ['tickers', 'weather', 'clock', 'display', 'settings'];
 let setupShown = false;
 
 function showTab(t) {

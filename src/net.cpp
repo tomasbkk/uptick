@@ -213,8 +213,9 @@ static void handleTheme()
   sendOk();
 }
 
-// What the panel shows: tickers, tickers and weather, or weather only. Live,
-// like the mode; Save keeps it.
+// What the panel rotates through: any of tickers, weather and clock. Live,
+// like the mode; Save keeps it. All three off is refused rather than leaving
+// the panel blank.
 static void handleShow()
 {
   if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
@@ -222,12 +223,16 @@ static void handleShow()
   JsonDocument d;
   if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
 
-  const String v = d["show"] | "";
-  if (v != "tickers" && v != "both" && v != "weather") { sendErr(400, "unknown show"); return; }
+  const bool t = d["tickers"] | false;
+  const bool w = d["weather"] | false;
+  const bool c = d["clock"]   | false;
+  if (!t && !w && !c) { sendErr(400, "pick at least one"); return; }
 
   {
     CfgLock lk;
-    g_cfg.show = v;
+    g_cfg.showTickers = t;
+    g_cfg.showWeather = w;
+    g_cfg.showClock   = c;
     g_cfgRev++;
   }
   sendOk();

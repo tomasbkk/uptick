@@ -1348,7 +1348,6 @@ static void drawWeatherWeek(const char* name, const CityWeather& w)
 }
 
 // Which city and screen the weather is on. The task moves these along.
-static bool     s_wxOn     = false;
 static uint8_t  s_wxCity   = 0;
 static uint8_t  s_wxScreen = 0;     // 0 now, 1 week
 static uint32_t s_wxAt     = 0;     // when the current screen went up
@@ -1369,6 +1368,182 @@ static void drawWeather(const Config& cfg)
   if (!w.valid)            drawWeatherWaiting(name);
   else if (s_wxScreen == 0) drawWeatherNow(name, w);
   else                      drawWeatherWeek(name, w);
+}
+
+// ---------------------------------------------------------------- clock
+
+// The clock, with the date under it, in a choice of themes - so far "matrix":
+// green rain streaming down the panel behind large pale digits. Each column
+// has at most one drop: a bright head with a tail fading to dark green, each
+// with its own speed and length, and a pause after it leaves before the next.
+//
+// The time is the clock city's: the device keeps UTC from SNTP, and the city's
+// UTC offset comes with its weather, which follows daylight saving. With no
+// city, or before its first fetch, it shows UTC and says so.
+
+struct Drop
+{
+  float   y;       // the head's row; the tail runs up from it
+  float   speed;   // rows per second
+  float   wait;    // seconds until the next drop, while none is falling
+  uint8_t len;
+  bool    on;
+};
+
+static Drop     s_rain[PANEL_W];
+static bool     s_rainReady  = false;
+static uint32_t s_rainLastUs = 0;
+static const uint8_t CLOCK_FPS = 30;
+
+static void dropStart(Drop& d)
+{
+  d.on    = true;
+  d.len   = (uint8_t)rnd(5, 15);
+  d.speed = rnd(10.0f, 26.0f);
+  d.y     = -1;
+}
+
+// Starts mid-flow rather than from an empty panel: about half the columns
+// already have a drop somewhere on them.
+static void rainReset()
+{
+  for (Drop& d : s_rain)
+  {
+    if (rnd(0, 1) < 0.5f)
+    {
+      dropStart(d);
+      d.y = rnd(0, PANEL_H + d.len);
+    }
+    else
+    {
+      d.on   = false;
+      d.wait = rnd(0, 2.0f);
+    }
+  }
+  s_rainLastUs = micros();
+  s_rainReady  = true;
+}
+
+static void drawRain()
+{
+  if (!s_rainReady) rainReset();
+
+  const uint32_t nowUs = micros();
+  float dt = (nowUs - s_rainLastUs) / 1000000.0f;
+  s_rainLastUs = nowUs;
+  if (dt > 0.1f) dt = 0.1f;
+
+  for (int16_t x = 0; x < PANEL_W; x++)
+  {
+    Drop& d = s_rain[x];
+    if (!d.on)
+    {
+      d.wait -= dt;
+      if (d.wait <= 0) dropStart(d);
+      continue;
+    }
+
+    d.y += d.speed * dt;
+    if (d.y - d.len > PANEL_H)
+    {
+      d.on   = false;
+      d.wait = rnd(0.2f, 2.5f);
+      continue;
+    }
+
+    // Head nearly white, then the tail fading on a square curve, so most of
+    // it is a dim green and only the front is bright.
+    const int16_t head = (int16_t)d.y;
+    for (uint8_t k = 0; k < d.len; k++)
+    {
+      const int16_t y = head - k;
+      if (y < 0 || y >= PANEL_H) continue;
+      if (k == 0) { matrix->drawPixel(x, y, col(200, 255, 200)); continue; }
+      const float f = 1.0f - (float)k / d.len;
+      matrix->drawPixel(x, y, col(0, (uint8_t)(40 + 200 * f * f), (uint8_t)(10 + 40 * f * f)));
+    }
+  }
+}
+
+// Text with a one-pixel black outline, so the rain stops short of it and the
+// figures stay readable whatever falls behind them. size 2 is the 5x7 font
+// doubled, which is what gives the clock its blocky digits.
+static void drawOutlined(int16_t x, int16_t yTop, const char* s, uint8_t size, uint16_t c)
+{
+  matrix->setFont(NULL);
+  matrix->setTextSize(size);
+  for (int8_t dy = -1; dy <= 1; dy++)
+    for (int8_t dx = -1; dx <= 1; dx++)
+    {
+      if (!dx && !dy) continue;
+      matrix->setTextColor(0);
+      matrix->setCursor(x + dx, yTop + dy);
+      matrix->print(s);
+    }
+  matrix->setTextColor(c);
+  matrix->setCursor(x, yTop);
+  matrix->print(s);
+  matrix->setTextSize(1);
+}
+
+static void drawTinyOutlined(int16_t x, int16_t yTop, const char* s, uint16_t c)
+{
+  for (int8_t dy = -1; dy <= 1; dy++)
+    for (int8_t dx = -1; dx <= 1; dx++)
+      if (dx || dy) drawTiny(x + dx, yTop + dy, s, 0);
+  drawTiny(x, yTop, s, c);
+}
+
+// The clock city's local time. False until SNTP has set the clock; utc says
+// whether there was a city offset to apply.
+static bool clockNow(const Config& cfg, struct tm& out, bool& utc)
+{
+  if (!clockValid()) return false;
+
+  int32_t off = 0;
+  utc = true;
+  if (cfg.cityCount)
+  {
+    const uint8_t i = cfg.clockCity < cfg.cityCount ? cfg.clockCity : 0;
+    WeatherLock lk;
+    if (g_weather[i].valid) { off = g_weather[i].utcOffset; utc = false; }
+  }
+
+  const time_t t = time(nullptr) + off;
+  gmtime_r(&t, &out);
+  return true;
+}
+
+static const char* const CLOCK_DOW[7]  = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+static const char* const CLOCK_MON[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+
+static void drawClock(const Config& cfg)
+{
+  matrix->fillScreen(0);
+  drawRain();
+
+  struct tm tm;
+  bool      utc = true;
+  char      hm[8], date[20];
+  if (clockNow(cfg, tm, utc))
+  {
+    // The colon blinks with the seconds. A space in its place keeps the
+    // digits where they are.
+    snprintf(hm, sizeof(hm), "%02d%c%02d", tm.tm_hour, (tm.tm_sec & 1) ? ' ' : ':', tm.tm_min);
+    snprintf(date, sizeof(date), "%s %d %s%s", CLOCK_DOW[tm.tm_wday % 7], tm.tm_mday,
+             CLOCK_MON[tm.tm_mon % 12], utc ? " UTC" : "");
+  }
+  else
+  {
+    snprintf(hm, sizeof(hm), "--:--");
+    snprintf(date, sizeof(date), "SETTING TIME");
+  }
+
+  // "16:17" doubled is 59 px - the 5x7 font advances 6 px a character, 12 at
+  // size 2, less the blank column after the last - so it centres at x 3.
+  drawOutlined(3, 3, hm, 2, col(190, 255, 200));
+  drawTinyOutlined((PANEL_W - tinyWidth(date)) / 2, 24, date, col(0, 170, 70));
 }
 
 // ---------------------------------------------------------------- screens
@@ -1628,15 +1803,16 @@ struct TickRow
 
 static TickRow s_rows[2];
 
-// The weather's hook into the tickers. With the weather mixed in (s_wxMix, set
-// by the task), each ticker reports the end of a full pass through the feeds
-// in s_lapDone, and the task then plays the weather screens.
+// The rotation's hook into the tickers. When anything else is to play after
+// them (s_lapWanted, set by the task), each ticker reports the end of a full
+// pass through the feeds in s_lapDone, and the task moves on to the weather
+// or the clock.
 //
 // The horizontal tape has no natural end, so it is given one: once the top
 // row has fed in its last feed, s_tickDrain stops both rows taking any more,
 // the tape scrolls off empty, and the pass is over. Afterwards it restarts
 // full from the left, the way it does when the mode is first chosen.
-static bool s_wxMix     = false;
+static bool s_lapWanted = false;
 static bool s_lapDone   = false;
 static bool s_tickDrain = false;
 
@@ -1754,7 +1930,7 @@ static void drawTicker(const Config& cfg)
 
   // The top row has fed in every feed: stop feeding, and once the tape has
   // scrolled off empty the pass is complete.
-  if (wrapped && s_wxMix) s_tickDrain = true;
+  if (wrapped && s_lapWanted) s_tickDrain = true;
   if (s_tickDrain && !s_rows[0].count && !s_rows[1].count) s_lapDone = true;
 }
 
@@ -1821,7 +1997,7 @@ static void drawVertical(const Config& cfg)
     for (uint8_t k = 0; k < n; k++) drawVerticalEntry(cfg, k, n == 1 ? 8 : k * V_BLOCK);
 
     // Nothing moves, so a pass is a feed's dwell time instead.
-    if (s_wxMix && millis() - s_vLapAt > (uint32_t)cfg.dwellSec * 1000UL) s_lapDone = true;
+    if (s_lapWanted && millis() - s_vLapAt > (uint32_t)cfg.dwellSec * 1000UL) s_lapDone = true;
     return;
   }
 
@@ -1833,7 +2009,7 @@ static void drawVertical(const Config& cfg)
   {
     s_vOff    = 0;
     s_vTop    = (s_vTop + 1) % n;
-    if (s_vTop == 0 && s_wxMix) s_lapDone = true;   // back at the top: a full pass
+    if (s_vTop == 0 && s_lapWanted) s_lapDone = true;   // back at the top: a full pass
     s_vHoldTo = millis() + (uint32_t)cfg.pauseSec * 1000UL;
   }
 
@@ -1920,7 +2096,13 @@ bool displayBegin()
   return true;
 }
 
-enum : uint8_t { ANIM_NONE, ANIM_HORIZONTAL, ANIM_VERTICAL, ANIM_CHART, ANIM_WEATHER };
+enum : uint8_t { ANIM_NONE, ANIM_HORIZONTAL, ANIM_VERTICAL, ANIM_CHART, ANIM_WEATHER, ANIM_CLOCK };
+
+// The parts of the rotation, in the order they play.
+enum : uint8_t { SEG_TICKERS, SEG_WEATHER, SEG_CLOCK, SEG_COUNT };
+static const char* const SEG_NAMES[SEG_COUNT] = { "tickers", "weather", "clock" };
+static uint8_t  s_seg   = SEG_TICKERS;
+static uint32_t s_segAt = 0;
 
 void displayTask(void* arg)
 {
@@ -1993,67 +2175,82 @@ void displayTask(void* arg)
 
     if (feedIdx >= cfg.feedCount) feedIdx = 0;
 
-    // What the panel shows. The test screens are never interrupted, and the
-    // weather only joins the tickers once there is a city to show.
-    const bool testMode = cfg.mode == "palette_test" || cfg.mode == "ramp_test";
-    const bool wxOnly   = !testMode && cfg.show == "weather";
-    s_wxMix             = !testMode && cfg.show == "both" && cfg.cityCount > 0;
-    if (!wxOnly && !s_wxMix)
+    // The rotation: tickers, then weather, then clock, then round again,
+    // skipping whatever is switched off. The tickers end after a full pass
+    // through the feeds, the weather after every city's two screens, the clock
+    // after clockSec; a part that is the only one on just stays up. The test
+    // screens are never interrupted.
+    const uint32_t now      = millis();
+    const bool     testMode = cfg.mode == "palette_test" || cfg.mode == "ramp_test";
+    const bool     tickOn   = testMode || cfg.showTickers;
+    const bool     clkOn    = !testMode && cfg.showClock;
+    // Weather with no city has nothing to show in a rotation - but alone it
+    // says how to add one, rather than the panel showing nothing.
+    const bool     wxOn     = !testMode && cfg.showWeather &&
+                              (cfg.cityCount > 0 || (!cfg.showTickers && !cfg.showClock));
+    const bool     segOn[SEG_COUNT] = { tickOn, wxOn, clkOn };
+
+    s_lapWanted = tickOn && !testMode && (wxOn || clkOn);
+    if (!s_lapWanted)
     {
-      s_wxOn      = false;
       s_lapDone   = false;
       s_tickDrain = false;
     }
 
+    // Moves to the next part that is on, and starts it from the beginning.
+    auto advance = [&]()
+    {
+      uint8_t next = s_seg;
+      for (uint8_t k = 1; k <= SEG_COUNT; k++)
+      {
+        const uint8_t cand = (s_seg + k) % SEG_COUNT;
+        if (segOn[cand]) { next = cand; break; }
+      }
+      s_seg    = next;
+      s_segAt  = now;
+      s_wxCity = 0;
+      s_wxScreen = 0;
+      s_wxAt   = now;
+      if (s_seg == SEG_TICKERS)
+      {
+        // The scrolling tickers restart through the change of animation
+        // below; the chart picks up at its first feed.
+        s_lapDone = false;
+        feedIdx   = 0;
+        lastSwap  = now;
+      }
+      Serial.printf("[disp] showing %s\n", SEG_NAMES[s_seg]);
+    };
+
+    if (!segOn[s_seg]) advance();          // what was showing has been switched off
+
     // The chart's pass ends when the last feed's turn does. A single feed has
     // no rotation, so its dwell is the pass.
-    if (!s_wxOn && millis() - lastSwap > (uint32_t)cfg.dwellSec * 1000UL &&
-        (cfg.feedCount > 1 || s_wxMix))
+    if (s_seg == SEG_TICKERS && now - lastSwap > (uint32_t)cfg.dwellSec * 1000UL &&
+        (cfg.feedCount > 1 || s_lapWanted))
     {
-      lastSwap = millis();
+      lastSwap = now;
       const bool lap = feedIdx + 1 >= cfg.feedCount;
       feedIdx = (feedIdx + 1) % cfg.feedCount;
-      if (lap && s_wxMix && cfg.mode == "single_chart") s_lapDone = true;
+      if (lap && s_lapWanted && cfg.mode == "single_chart") s_lapDone = true;
     }
 
-    // The weather: every city's now and week screens in turn, weatherSec each.
-    // After a pass of the tickers that is one round, then back to them; with
-    // the tickers off it simply goes round again.
+    if (s_seg == SEG_TICKERS && s_lapWanted && s_lapDone) advance();
+
+    // Each city's now and week screens in turn, weatherSec each.
+    if (s_seg == SEG_WEATHER && now - s_wxAt >= (uint32_t)cfg.weatherSec * 1000UL)
     {
-      const uint32_t now = millis();
-      if (!s_wxOn && (wxOnly || (s_wxMix && s_lapDone)))
-      {
-        s_wxOn      = true;
-        s_lapDone   = false;
-        s_wxCity    = 0;
-        s_wxScreen  = 0;
-        s_wxAt      = now;
-        Serial.printf("[disp] weather on, %u cities\n", cfg.cityCount);
-      }
-      if (s_wxOn && now - s_wxAt >= (uint32_t)cfg.weatherSec * 1000UL)
-      {
-        s_wxAt = now;
-        if (++s_wxScreen > 1) { s_wxScreen = 0; s_wxCity++; }
-        if (s_wxCity >= cfg.cityCount)
-        {
-          s_wxCity = 0;
-          if (!wxOnly)
-          {
-            // Back to the tickers. They restart through the change of
-            // animation below; the chart picks up at its first feed.
-            s_wxOn   = false;
-            feedIdx  = 0;
-            lastSwap = now;
-            Serial.println("[disp] weather done, back to the tickers");
-          }
-        }
-      }
+      s_wxAt = now;
+      if (++s_wxScreen > 1) { s_wxScreen = 0; s_wxCity++; }
+      if (s_wxCity >= cfg.cityCount) advance();
     }
+
+    if (s_seg == SEG_CLOCK && now - s_segAt >= (uint32_t)cfg.clockSec * 1000UL) advance();
 
     // Only the chart shows one feed at a time. Everything else - the tickers,
-    // the weather, the test and setup screens - leaves the fetcher free to
-    // poll whatever is due.
-    s_visibleFeed = (cfg.mode == "single_chart" && !s_wxOn) ? (int8_t)feedIdx : (int8_t)-1;
+    // the weather, the clock, the test and setup screens - leaves the fetcher
+    // free to poll whatever is due.
+    s_visibleFeed = (cfg.mode == "single_chart" && s_seg == SEG_TICKERS) ? (int8_t)feedIdx : (int8_t)-1;
 
     Quote q;
     {
@@ -2093,7 +2290,8 @@ void displayTask(void* arg)
     // while it snows, since the snow moves even when the chart does not. They
     // stand aside for the setup and just-joined screens, which matter more.
     const uint8_t anim = (g_net.apMode || showInfo)              ? ANIM_NONE
-                       : s_wxOn                                 ? ANIM_WEATHER
+                       : s_seg == SEG_WEATHER                   ? ANIM_WEATHER
+                       : s_seg == SEG_CLOCK                     ? ANIM_CLOCK
                        : cfg.mode == "ticker"                   ? ANIM_HORIZONTAL
                        : cfg.mode == "ticker_vertical"          ? ANIM_VERTICAL
                        : (snow && cfg.mode == "single_chart")   ? ANIM_CHART
@@ -2117,6 +2315,7 @@ void displayTask(void* arg)
       if (anim == ANIM_HORIZONTAL)    drawTicker(cfg);
       else if (anim == ANIM_VERTICAL) drawVertical(cfg);
       else if (anim == ANIM_WEATHER)  drawWeather(cfg);
+      else if (anim == ANIM_CLOCK)    drawClock(cfg);
       else if (!q.valid)              drawWaiting(cfg.feeds[feedIdx]);
       else                            drawSingleChart(cfg, cfg.feeds[feedIdx], q, stale);
       if (snow) drawSanta();          // over the content, unlike the snow
@@ -2130,6 +2329,7 @@ void displayTask(void* arg)
       s_stackFree = uxTaskGetStackHighWaterMark(nullptr);
       const uint16_t fps = (anim == ANIM_CHART)   ? SNOW_FPS
                          : (anim == ANIM_WEATHER) ? WX_FPS
+                         : (anim == ANIM_CLOCK)   ? CLOCK_FPS
                          : (cfg.scrollSpeed ? cfg.scrollSpeed : 20);
       const TickType_t period = pdMS_TO_TICKS(1000 / fps);
       vTaskDelayUntil(&wake, period ? period : 1);

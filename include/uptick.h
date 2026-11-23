@@ -3,7 +3,7 @@
 #include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.26.1"
+#define UPTICK_VERSION   "0.27.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 #define UPTICK_MAX_CITIES 8
@@ -47,13 +47,20 @@ struct Config
   uint8_t  feedCount;
   Feed     feeds[UPTICK_MAX_FEEDS];
 
-  // "tickers" | "both" | "weather". With "both" the weather screens play once
-  // after every full pass of the tickers; with "weather" they are all there is.
-  String   show;
+  // What the panel rotates through, in this order. With the tickers on, the
+  // weather and the clock play after every full pass of them; without, the
+  // others take turns, and one on its own stays up.
+  bool     showTickers;
+  bool     showWeather;
+  bool     showClock;
   String   weatherUnits; // "c" | "f"
   uint8_t  weatherSec;   // seconds each weather screen stays up
   uint8_t  cityCount;
   City     cities[UPTICK_MAX_CITIES];
+
+  String   clockTheme;   // "matrix"
+  uint16_t clockSec;     // seconds the clock stays up in the rotation
+  uint8_t  clockCity;    // whose local time it shows, from cities; UTC with none
 };
 
 extern Config g_cfg;

@@ -33,7 +33,12 @@ void configDefaults(Config& c)
   c.feeds[3]   = { "binance", "ZECUSDT", "ZEC", "1h", 0 };
 
   // No cities until one is added, so the weather screens stay out of the way.
-  c.show         = "tickers";
+  c.showTickers  = true;
+  c.showWeather  = false;
+  c.showClock    = false;
+  c.clockTheme   = "matrix";
+  c.clockSec     = 10;
+  c.clockCity    = 0;
   c.weatherUnits = "c";
   c.weatherSec   = 8;
   c.cityCount    = 0;
@@ -159,7 +164,12 @@ String configToJson()
     for (uint8_t i = 0; i < g_cfg.feedCount; i++)
       feedToJson(g_cfg.feeds[i], feeds.add<JsonObject>());
 
-    d["show"]         = g_cfg.show;
+    d["showTickers"]  = g_cfg.showTickers;
+    d["showWeather"]  = g_cfg.showWeather;
+    d["showClock"]    = g_cfg.showClock;
+    d["clockTheme"]   = g_cfg.clockTheme;
+    d["clockSec"]     = g_cfg.clockSec;
+    d["clockCity"]    = g_cfg.clockCity;
     d["weatherUnits"] = g_cfg.weatherUnits;
     d["weatherSec"]   = g_cfg.weatherSec;
     JsonArray cities = d["cities"].to<JsonArray>();
@@ -234,8 +244,26 @@ bool configFromJson(const String& body, String& err)
   // than failing the document, and a city that makes no sense is skipped - a
   // backup should always restore. Names are trimmed to what the panel can
   // show in its small font.
-  c.show = d["show"] | "tickers";
-  if (c.show != "both" && c.show != "weather") c.show = "tickers";
+  // What to show. 0.26 stored a single "show" of tickers, both or weather; a
+  // config or backup from then is read into the switches it meant.
+  if (d["showTickers"].isNull() && !d["show"].isNull())
+  {
+    const String old = d["show"] | "tickers";
+    c.showTickers = old != "weather";
+    c.showWeather = old == "both" || old == "weather";
+    c.showClock   = false;
+  }
+  else
+  {
+    c.showTickers = d["showTickers"] | true;
+    c.showWeather = d["showWeather"] | false;
+    c.showClock   = d["showClock"]   | false;
+  }
+  if (!c.showTickers && !c.showWeather && !c.showClock) c.showTickers = true;   // never a blank panel
+
+  c.clockTheme = "matrix";                 // the only theme so far; unknown ones load as it
+  c.clockSec   = constrain((int)(d["clockSec"] | 10), 3, 600);
+  c.clockCity  = constrain((int)(d["clockCity"] | 0), 0, UPTICK_MAX_CITIES - 1);
   c.weatherUnits = (String(d["weatherUnits"] | "c") == "f") ? "f" : "c";
   c.weatherSec   = constrain((int)(d["weatherSec"] | 8), 3, 60);
 
