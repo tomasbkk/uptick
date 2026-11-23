@@ -106,7 +106,7 @@ Only the Matrix Portal S3 is supported as it stands. Another ESP32-S3 board with
 
 Open **http://uptick.local** in a browser on the same network. The page has three tabs: **Tickers**, **Display** and **Settings**.
 
-Brightness, layout, theme, scroll speed and colors change on the panel the moment you touch them, so you can judge them before keeping them. Nothing is kept until you press **Save** - a bar that appears at the bottom of the page whenever there are unsaved changes, on any tab, and saves all of them. Restarting without saving brings back what was saved.
+Brightness, what to show, layout, theme, clock theme, scroll speed and colors change on the panel the moment you touch them, so you can judge them before keeping them. Nothing is kept until you press **Save** - a bar that appears at the bottom of the page whenever there are unsaved changes, on any tab, and saves all of them. Restarting without saving brings back what was saved.
 
 ### Adding tickers
 
@@ -310,7 +310,7 @@ Both run entirely in the browser - the page already holds the config, so no endp
 
 ### Saving
 
-Every setting the web page changes is one config document, so there is one Save: a bar that appears at the foot of the page whenever anything is unsaved, on any tab, and saves all of it. Brightness, mode, scroll speed, pause, power save and colours apply to the panel as soon as they change, so the effect can be judged before saving; everything else waits for Save. Pausing fetching and the CoinGecko key have their own buttons and are not part of the config.
+Every setting the web page changes is one config document, so there is one Save: a bar that appears at the foot of the page whenever anything is unsaved, on any tab, and saves all of it. Brightness, what to show, mode, theme, clock theme, scroll speed, pause, power save and colors apply to the panel as soon as they change, so the effect can be judged before saving; everything else waits for Save. Pausing fetching and the CoinGecko key have their own buttons and are not part of the config.
 
 Power save used to be applied only when WiFi joined, so saving a change to it did nothing until a restart. A config POST now applies it straight away.
 
