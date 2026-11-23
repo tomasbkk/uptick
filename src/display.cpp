@@ -2473,20 +2473,46 @@ static void __attribute__((noinline)) clockSnake(const ClockTime& ct)
 
   // The snake, bright at the head and darker toward the tail - or, dead,
   // flashing red and white.
+  //
+  // The body is patterned: across its two-pixel thickness one pixel is green
+  // and the other brown, swapping sides from one segment to the next, like a
+  // snake's markings. Thickness is across the way the body runs there - rows
+  // where it runs sideways, columns where it runs up or down - taken from the
+  // next segment toward the head. The side is chosen by the segment's place
+  // in the ring rather than its distance from the head, so the markings travel
+  // with the body instead of flickering at every step.
   const bool    dead  = s_snDeadAt != 0;
   const bool    flash = dead && ((millis() - s_snDeadAt) / 150) & 1;
   for (int16_t k = s_snLen - 1; k >= 0; k--)
   {
-    const int16_t i = (s_snHead - k + SN_MAX) % SN_MAX;
-    uint16_t c;
-    if (dead)        c = flash ? col(255, 255, 255) : col(255, 30, 30);
-    else if (k == 0) c = col(160, 255, 120);
+    const int16_t i  = (s_snHead - k + SN_MAX) % SN_MAX;
+    const int16_t px = s_snX[i] * 2, py = s_snY[i] * 2;
+
+    if (dead || k == 0)
+    {
+      uint16_t c = col(160, 255, 120);
+      if (dead) c = flash ? col(255, 255, 255) : col(255, 30, 30);
+      matrix->fillRect(px, py, 2, 2, c);
+      continue;
+    }
+
+    const float    f     = (float)k / s_snLen;
+    const uint16_t green = col(0, (uint8_t)(220 - 130 * f), (uint8_t)(70 - 40 * f));
+    const uint16_t brown = col((uint8_t)(140 - 60 * f), (uint8_t)(80 - 35 * f), (uint8_t)(20 - 10 * f));
+
+    const int16_t toward   = (i + 1) % SN_MAX;            // the next segment toward the head
+    const bool    sideways = s_snY[toward] == s_snY[i];
+    const bool    swap     = i & 1;
+    if (sideways)
+    {
+      matrix->drawFastHLine(px, py,     2, swap ? brown : green);
+      matrix->drawFastHLine(px, py + 1, 2, swap ? green : brown);
+    }
     else
     {
-      const float f = (float)k / s_snLen;
-      c = col(0, (uint8_t)(220 - 130 * f), (uint8_t)(70 - 40 * f));
+      matrix->drawFastVLine(px,     py, 2, swap ? brown : green);
+      matrix->drawFastVLine(px + 1, py, 2, swap ? green : brown);
     }
-    matrix->fillRect(s_snX[i] * 2, s_snY[i] * 2, 2, 2, c);
   }
 }
 
