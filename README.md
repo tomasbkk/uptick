@@ -107,10 +107,7 @@ Brightness, layout, theme, scroll speed and colors change on the panel the momen
 
 ### Adding tickers
 
-On the **Tickers** tab:
-
-1. Press **+ Add Ticker**. The new row takes the source of the row above it.
-2. Pick a **Source** and type the **Symbol** the way that source names it:
+Each source names its symbols its own way:
 
 | Source | What it covers | Symbol | Examples |
 | --- | --- | --- | --- |
@@ -119,7 +116,12 @@ On the **Tickers** tab:
 | coingecko | crypto, including coins Binance does not list | the coin id from its CoinGecko page address | `bitcoin`, `ethereum` |
 | yahoo | stocks, ETFs, indices, futures, currencies | the ticker as Yahoo Finance shows it | `AAPL`, `SPY`, `^GSPC`, `GC=F` (gold), `EURUSD=X`, `SAP.DE` |
 
-   CoinGecko needs a free demo API key, entered under Settings -> Market data. The other three need nothing.
+CoinGecko needs a free demo API key, entered under Settings -> Market data. The other three need nothing.
+
+On the **Tickers** tab:
+
+1. Press **+ Add Ticker**. The new row takes the source of the row above it.
+2. Pick a **Source** and type the **Symbol** the way that source names it, as in the table above.
 3. Press **check** to confirm the symbol exists and see its current price.
 4. **Label** is what the panel shows. Leave it blank and it is made from the symbol, with a dollar quote dropped - `BTCUSDT` shows as `BTC`.
 5. **Chart candle** sets how far back the chart reaches - the chart is 64 candles wide, and each choice in the list shows the span it gives for that source. **Decimals** at 0 picks sensibly from the price.
