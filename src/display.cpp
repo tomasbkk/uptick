@@ -1524,9 +1524,9 @@ static float clockDt(uint32_t& lastUs)
 
 // The themes, in the order the web page lists them.
 enum : uint8_t { CT_MATRIX, CT_FLIP, CT_RETRO, CT_PONG, CT_TETRIS, CT_SKY, CT_ANALOG, CT_PLATFORMER,
-                 CT_COUNT };
+                 CT_SNAKE, CT_COUNT };
 static const char* const CLOCK_THEMES[CT_COUNT] = {
-  "matrix", "flip", "retro", "pong", "tetris", "sky", "analog", "platformer"
+  "matrix", "flip", "retro", "pong", "tetris", "sky", "analog", "platformer", "snake"
 };
 
 uint8_t displayClockThemeCount()           { return CT_COUNT; }
@@ -2232,6 +2232,264 @@ static void __attribute__((noinline)) clockPlatformer(const ClockTime& ct)
   else     plSprite(hx, hy, PL_SMALL[frame], 8);
 }
 
+// ---------------------------------------------------------------- snake
+
+// The panel as a 32x16 board of 2x2 cells. The time sits in the middle as
+// solid blocks; a snake steers itself after tiny mushrooms, two cells longer
+// for each, and dies when it runs into a digit or into itself - then flashes
+// and a new one starts. The edges wrap, so only the digits and the snake are
+// deadly.
+//
+// It is deliberately not a perfect player, but not a hopeless one either.
+// Each step it takes the move that brings it closest to the mushroom, among
+// those that lead into a space big enough to hold its body - so it does not
+// simply steer into a dead end beside a digit - and one step in 25 it takes
+// any move that is merely not a crash. Simulated over a hundred games, that
+// lives a median of about two minutes and dies around 66 cells long; with no
+// space check the median was 14 seconds, and with no careless moves it could
+// run for an hour.
+static const int16_t SN_W = PANEL_W / 2;   // 32
+static const int16_t SN_H = PANEL_H / 2;   // 16
+static const int16_t SN_MAX = SN_W * SN_H;
+static const int16_t SN_DX[4] = { 3, 9, 18, 24 };   // digit columns, in cells
+static const int16_t SN_DY    = 4;
+static const float   SN_STEP  = 0.1f;               // seconds per move
+static const float   SN_CARELESS = 0.04f;           // chance of a move that only avoids a crash
+
+static uint8_t  s_snX[SN_MAX], s_snY[SN_MAX];      // a ring, the head at s_snHead
+static int16_t  s_snHead = 0, s_snLen = 0, s_snGrow = 0;
+static int8_t   s_snDx = 1, s_snDy = 0;
+static uint8_t  s_snFx = 0, s_snFy = 0;
+static float    s_snAcc = 0;
+static uint32_t s_snLastUs = 0, s_snDeadAt = 0;
+static bool     s_snakeLive = false;               // a game is under way, to carry on with
+
+// The time's blocks on the board: four digits and the colon. d holds the
+// digits, or -1 for none while the clock is unset.
+static bool snakeWall(int16_t x, int16_t y, const int8_t* d)
+{
+  if (x == 15 && (y == SN_DY + 2 || y == SN_DY + 4) && d[0] >= 0) return true;
+  if (y < SN_DY || y >= SN_DY + 7) return false;
+  for (uint8_t i = 0; i < 4; i++)
+    if (d[i] >= 0 && x >= SN_DX[i] && x < SN_DX[i] + 5 && digitBit(d[i], x - SN_DX[i], y - SN_DY))
+      return true;
+  return false;
+}
+
+// Scratch for the space check: 1 where the board is blocked or already
+// counted. Static, as the display task's stack is better spent elsewhere.
+static uint8_t s_snGrid[SN_H][SN_W];
+static uint8_t s_snSeen[SN_H][SN_W];
+static int16_t s_snStack[SN_MAX];
+
+// How many cells can be reached from (x, y), counting up to limit at most.
+static int16_t snakeRoom(int16_t x, int16_t y, int16_t limit)
+{
+  memcpy(s_snSeen, s_snGrid, sizeof(s_snSeen));
+  if (s_snSeen[y][x]) return 0;
+  int16_t top = 0, count = 0;
+  s_snSeen[y][x] = 1;
+  s_snStack[top++] = x + y * SN_W;
+  while (top && count < limit)
+  {
+    const int16_t c = s_snStack[--top];
+    count++;
+    const int16_t cx = c % SN_W, cy = c / SN_W;
+    const int16_t nb[4][2] = { { (int16_t)((cx + 1) % SN_W), cy }, { (int16_t)((cx + SN_W - 1) % SN_W), cy },
+                               { cx, (int16_t)((cy + 1) % SN_H) }, { cx, (int16_t)((cy + SN_H - 1) % SN_H) } };
+    for (const auto& n : nb)
+      if (!s_snSeen[n[1]][n[0]])
+      {
+        s_snSeen[n[1]][n[0]] = 1;
+        s_snStack[top++] = n[0] + n[1] * SN_W;
+      }
+  }
+  return count;
+}
+
+static bool snakeBody(int16_t x, int16_t y)
+{
+  for (int16_t k = 0; k < s_snLen; k++)
+  {
+    const int16_t i = (s_snHead - k + SN_MAX) % SN_MAX;
+    if (s_snX[i] == x && s_snY[i] == y) return true;
+  }
+  return false;
+}
+
+static void snakeFood(const int8_t* d)
+{
+  for (uint16_t tries = 0; tries < 500; tries++)
+  {
+    const int16_t x = (int16_t)rnd(0, SN_W - 0.01f), y = (int16_t)rnd(0, SN_H - 0.01f);
+    if (snakeWall(x, y, d) || snakeBody(x, y)) continue;
+    s_snFx = x;
+    s_snFy = y;
+    return;
+  }
+}
+
+// A new snake of four, heading right along a row clear of the digits.
+static void snakeNew(const int8_t* d)
+{
+  const int16_t y = rnd(0, 1) < 0.5f ? 1 : SN_H - 2;
+  s_snLen  = 4;
+  s_snHead = 3;
+  for (int16_t k = 0; k < 4; k++) { s_snX[k] = 2 + k; s_snY[k] = y; }
+  s_snDx = 1; s_snDy = 0;
+  s_snGrow   = 0;
+  s_snDeadAt = 0;
+  s_snAcc    = 0;
+  snakeFood(d);
+}
+
+static void snakeReset(const ClockTime& ct)
+{
+  const int8_t d[4] = { (int8_t)(ct.ok ? ct.h / 10 : -1), (int8_t)(ct.ok ? ct.h % 10 : -1),
+                        (int8_t)(ct.ok ? ct.m / 10 : -1), (int8_t)(ct.ok ? ct.m % 10 : -1) };
+  snakeNew(d);
+  s_snLastUs = micros();
+}
+
+// Shortest way round on a board whose edges wrap.
+static int16_t snakeDist(int16_t a, int16_t b, int16_t span)
+{
+  int16_t d = abs(a - b);
+  return d < span - d ? d : span - d;
+}
+
+static void snakeStep(const int8_t* d)
+{
+  const int16_t hx = s_snX[s_snHead], hy = s_snY[s_snHead];
+
+  // Ahead, left and right - never straight back.
+  const int8_t dirs[3][2] = { { s_snDx, s_snDy }, { (int8_t)-s_snDy, s_snDx }, { s_snDy, (int8_t)-s_snDx } };
+  int8_t  safe[3];
+  uint8_t n = 0;
+  for (uint8_t k = 0; k < 3; k++)
+  {
+    const int16_t nx = (hx + dirs[k][0] + SN_W) % SN_W, ny = (hy + dirs[k][1] + SN_H) % SN_H;
+    if (!snakeWall(nx, ny, d) && !snakeBody(nx, ny)) safe[n++] = k;
+  }
+
+  if (!n)
+  {
+    s_snDeadAt = millis() | 1;              // boxed in: this is where it dies
+    s_snakeLive = false;
+    return;
+  }
+
+  // The space check: the board as it stands, then for each safe move the
+  // room it leads into. A move into less room than the body needs is a dead
+  // end, and avoided while there is anything better.
+  for (int16_t y = 0; y < SN_H; y++)
+    for (int16_t x = 0; x < SN_W; x++) s_snGrid[y][x] = snakeWall(x, y, d) ? 1 : 0;
+  for (int16_t k = 0; k < s_snLen; k++)
+  {
+    const int16_t i = (s_snHead - k + SN_MAX) % SN_MAX;
+    s_snGrid[s_snY[i]][s_snX[i]] = 1;
+  }
+  int8_t  roomy[3];
+  uint8_t r = 0;
+  for (uint8_t i = 0; i < n; i++)
+  {
+    const int16_t nx = (hx + dirs[safe[i]][0] + SN_W) % SN_W, ny = (hy + dirs[safe[i]][1] + SN_H) % SN_H;
+    if (snakeRoom(nx, ny, s_snLen + 1) > s_snLen) roomy[r++] = safe[i];
+  }
+  const int8_t* pool  = r ? roomy : safe;
+  const uint8_t poolN = r ? r : n;
+
+  uint8_t pick = pool[0];
+  if (n > 1 && rnd(0, 1) < SN_CARELESS)
+  {
+    pick = safe[(uint8_t)rnd(0, n - 0.01f)];   // the odd careless move
+  }
+  else
+  {
+    int16_t best = 0x7FFF;
+    for (uint8_t i = 0; i < poolN; i++)
+    {
+      const int16_t nx = (hx + dirs[pool[i]][0] + SN_W) % SN_W, ny = (hy + dirs[pool[i]][1] + SN_H) % SN_H;
+      const int16_t dist = snakeDist(nx, s_snFx, SN_W) + snakeDist(ny, s_snFy, SN_H);
+      if (dist < best) { best = dist; pick = pool[i]; }
+    }
+  }
+
+  s_snDx = dirs[pick][0];
+  s_snDy = dirs[pick][1];
+  const int16_t nx = (hx + s_snDx + SN_W) % SN_W, ny = (hy + s_snDy + SN_H) % SN_H;
+
+  s_snHead = (s_snHead + 1) % SN_MAX;
+  s_snX[s_snHead] = nx;
+  s_snY[s_snHead] = ny;
+  if (s_snGrow > 0 && s_snLen < SN_MAX - 1) { s_snLen++; s_snGrow--; }
+
+  if (nx == s_snFx && ny == s_snFy)
+  {
+    s_snGrow += 2;
+    snakeFood(d);
+  }
+}
+
+static void __attribute__((noinline)) clockSnake(const ClockTime& ct)
+{
+  const int8_t d[4] = { (int8_t)(ct.ok ? ct.h / 10 : -1), (int8_t)(ct.ok ? ct.h % 10 : -1),
+                        (int8_t)(ct.ok ? ct.m / 10 : -1), (int8_t)(ct.ok ? ct.m % 10 : -1) };
+  const float dt = clockDt(s_snLastUs);
+
+  // A new minute can drop a digit onto the mushroom: move the mushroom.
+  if (snakeWall(s_snFx, s_snFy, d)) snakeFood(d);
+
+  if (s_snDeadAt)
+  {
+    // Flashes for a second and a half, then a new snake.
+    if (millis() - s_snDeadAt > 1500) { snakeNew(d); s_snakeLive = true; }
+  }
+  else
+  {
+    s_snakeLive = true;
+    s_snAcc += dt;
+    while (s_snAcc >= SN_STEP && !s_snDeadAt)
+    {
+      s_snAcc -= SN_STEP;
+      snakeStep(d);
+    }
+  }
+
+  // The date underneath, dim and not in the way: the snake passes over it.
+  char date[20];
+  clockDate(ct, date, sizeof(date), false);
+  drawTinyCentered(26, date, col(60, 60, 70));
+
+  // The time as solid blocks.
+  const uint16_t wall = col(200, 200, 210);
+  for (int16_t y = SN_DY; y < SN_DY + 7; y++)
+    for (int16_t x = 0; x < SN_W; x++)
+      if (snakeWall(x, y, d)) matrix->fillRect(x * 2, y * 2, 2, 2, wall);
+
+  // The mushroom: a red cap over a pale stem, one cell.
+  matrix->drawFastHLine(s_snFx * 2, s_snFy * 2,     2, col(230, 30, 30));
+  matrix->drawFastHLine(s_snFx * 2, s_snFy * 2 + 1, 2, col(240, 210, 160));
+
+  // The snake, bright at the head and darker toward the tail - or, dead,
+  // flashing red and white.
+  const bool    dead  = s_snDeadAt != 0;
+  const bool    flash = dead && ((millis() - s_snDeadAt) / 150) & 1;
+  for (int16_t k = s_snLen - 1; k >= 0; k--)
+  {
+    const int16_t i = (s_snHead - k + SN_MAX) % SN_MAX;
+    uint16_t c;
+    if (dead)        c = flash ? col(255, 255, 255) : col(255, 30, 30);
+    else if (k == 0) c = col(160, 255, 120);
+    else
+    {
+      const float f = (float)k / s_snLen;
+      c = col(0, (uint8_t)(220 - 130 * f), (uint8_t)(70 - 40 * f));
+    }
+    matrix->fillRect(s_snX[i] * 2, s_snY[i] * 2, 2, 2, c);
+  }
+}
+
 // ---------------------------------------------------------------- clock face
 
 static uint8_t s_clockTheme = 0xFF;          // the theme last drawn, to reset on a change
@@ -2250,17 +2508,19 @@ static uint8_t clockThemeIndex(const Config& cfg)
 // rather than mid-animation - Tetris builds its digits, the platformer plays
 // its scene from the top.
 //
-// Except pong, which is a game in progress rather than an animation: it
-// carries on where it left off, as if paused while the tickers had the panel.
-// The score catches up through its usual rule - a minute that turned while it
-// was away makes a side miss. Only the first time, or choosing pong again
-// after another theme, starts a new game.
+// Except the games, pong and snake, which are play in progress rather than
+// animations: they carry on where they left off, as if paused while the
+// tickers had the panel. Pong's score catches up through its usual rule - a
+// minute that turned while it was away makes a side miss. Only the first time,
+// or choosing a game after another theme, starts a new one.
 static void clockReset(const Config& cfg)
 {
-  const ClockTime ct = clockNow(cfg);
-  const uint8_t   th = clockThemeIndex(cfg);
-  if (th != CT_PONG || !s_pongLive || th != s_clockTheme) pongReset(ct);
+  const ClockTime ct   = clockNow(cfg);
+  const uint8_t   th   = clockThemeIndex(cfg);
+  const bool      same = th == s_clockTheme;
+  if (th != CT_PONG || !s_pongLive || !same) pongReset(ct);
   s_pongLive = (th == CT_PONG);
+  if (th != CT_SNAKE || !s_snakeLive || !same) snakeReset(ct);
 
   s_clockTheme = th;
   s_clockBack  = false;
@@ -2285,6 +2545,7 @@ static void drawClock(const Config& cfg)
     case CT_SKY:        clockSky(ct);        break;
     case CT_ANALOG:     clockAnalog(ct);     break;
     case CT_PLATFORMER: clockPlatformer(ct); break;
+    case CT_SNAKE:      clockSnake(ct);      break;
     default:            clockMatrix(ct);     break;
   }
 }

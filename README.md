@@ -7,7 +7,7 @@ A desk ticker for crypto and stock prices on a 64x32 RGB LED panel, driven by an
 - **Up to 32 feeds**, checked against their source before they are saved, reorderable, and exportable to a file
 - **Flicker-free** DMA-driven display with hardware brightness and a tunable color palette
 - **Weather:** current conditions with an animated icon and a 5-day forecast for up to 8 cities
-- **Clock with date:** eight themes - Matrix rain, split-flap, retro LED, Pong, Tetris, the real sky, an analog face and a little platform game - in any of your cities' time zones
+- **Clock with date:** nine themes - Matrix rain, split-flap, retro LED, Pong, Tetris, the real sky, an analog face, a little platform game and Snake - in any of your cities' time zones
 - **Mix and match:** tickers, weather and clock in rotation, or any one on its own
 - **Christmas theme:** falling snow that settles on the chart, a snowman or a tree, and Santa flying past now and then
 
@@ -163,6 +163,7 @@ The clock shows the time and the date in 24-hour time, in a choice of themes. Ch
 | sky | the sky outside: real sunrise and sunset, sun and moon arcing over hills, stars at night |
 | analog | a round face with a sweeping second hand, and the weekday, day and month beside it |
 | platformer | a plumber runs in, jumps and hits a "?" box, chases the mushroom out of it and grows |
+| snake | a snake chases tiny mushrooms around the digits, growing as it eats, until it hits a digit or itself |
 
 With no city the clock shows UTC and says so.
 
@@ -624,9 +625,10 @@ Every animation runs on real time rather than a step per frame, and a theme star
 - **tetris:** when a digit changes it clears and its 2x2 cells drop in one at a time, bottom row first, at 90 rows a second. Cells are colored four at a time, so the digit looks stacked from tetrominoes.
 - **sky:** an hour either side of sunrise blends night to dawn to day, and an hour either side of sunset day to dusk to night, from the clock city's real times. The sun crosses from horizon to horizon through the day and the moon through the night, stars twinkle once it is dark, over two sine waves of hills. Without sunrise and sunset it assumes six and six.
 - **analog:** hour, minute and a red second hand that sweeps, using the fraction of the second from `gettimeofday`; the weekday, the day of the month in doubled digits and the month on the right.
+- **snake:** the panel as a 32x16 board of 2x2 cells with the edges wrapping, the time as solid blocks in the middle. Each step the snake takes the move that brings it closest to the mushroom among those leading into enough room for its body - a flood fill from each candidate, stopping once it has counted one more cell than the snake is long - and one step in 25 it takes any move that merely avoids a crash. Each mushroom adds two cells. With no moves left it flashes red and white for 1.5 s and a new snake of four starts. The numbers came from simulating a hundred games against real digits: one-cell lookahead alone lived a median of 14 s, the space check with no careless moves could run for an hour, and 4% careless moves gives a median of about two minutes and a length of around 66 at death. A new minute that lands a digit on the mushroom moves the mushroom. Like pong, a game in progress carries on when the clock comes round again.
 - **platformer:** a 9.5-second script, every position worked out from the time into it. The plumber runs in, jumps and hits the box, which bumps and is spent; a mushroom rises out of it, slides off and drops, he chases it, flickers between sizes and grows, and runs off. The box sits at the right so he can grow beside it without the two overlapping. The art is drawn for this clock in the style of the old platform games, not copied from any.
 
-Frame times measured on the device: matrix 6.5 ms, sky 5.4, flip 3.1, tetris 1.3, retro 1.1, platformer 1.1, analog 1.0 and pong 0.8, against 33 ms at 30 fps.
+Frame times measured on the device: matrix 6.5 ms, sky 5.4, flip 3.1, snake 1.4, tetris 1.3, retro 1.1, platformer 1.1, analog 1.0 and pong 0.8, against 33 ms at 30 fps.
 
 ### The rotation
 
@@ -659,7 +661,7 @@ It is RF, not bus contention. Changing edge speed at a fixed clock changed the r
 
 ## Status
 
-Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, chart and both scrolling tickers, tabbed web UI, Binance / Coinbase / CoinGecko / Yahoo adapters with batch fetching, pre-market and after-hours prices with market-state icons, symbol checks on save, up to 32 feeds, feed reordering and export/import, weather for up to 8 cities, a clock with eight themes, a rotation through any of tickers, weather and clock, and the Christmas theme.
+Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, chart and both scrolling tickers, tabbed web UI, Binance / Coinbase / CoinGecko / Yahoo adapters with batch fetching, pre-market and after-hours prices with market-state icons, symbol checks on save, up to 32 feeds, feed reordering and export/import, weather for up to 8 cities, a clock with nine themes, a rotation through any of tickers, weather and clock, and the Christmas theme.
 
 Ideas, roughly in order of value:
 
