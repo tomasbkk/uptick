@@ -2949,6 +2949,18 @@ void displayTask(void* arg)
         const uint8_t cand = (s_seg + k) % SEG_COUNT;
         if (segOn[cand]) { next = cand; break; }
       }
+      // The only part on comes round to itself. The weather then simply goes
+      // round its cities again, but the clock must not be disturbed: treating
+      // it as coming round restarted every theme each clockSec - Tetris
+      // rebuilding, the platformer replaying, pong serving a new game - on a
+      // panel showing nothing but the clock.
+      if (next == s_seg && s_seg == SEG_CLOCK)
+      {
+        s_segAt = now;
+        return;
+      }
+
+      const bool moved = next != s_seg;
       s_seg    = next;
       s_segAt  = now;
       s_wxCity = 0;
@@ -2963,7 +2975,7 @@ void displayTask(void* arg)
         feedIdx   = 0;
         lastSwap  = now;
       }
-      Serial.printf("[disp] showing %s\n", SEG_NAMES[s_seg]);
+      if (moved) Serial.printf("[disp] showing %s\n", SEG_NAMES[s_seg]);
     };
 
     if (!segOn[s_seg]) advance();          // what was showing has been switched off
