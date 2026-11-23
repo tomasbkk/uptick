@@ -7,7 +7,7 @@ A desk ticker for crypto and stock prices on a 64x32 RGB LED panel, driven by an
 - **Up to 32 feeds**, checked against their source before they are saved, reorderable, and exportable to a file
 - **Flicker-free** DMA-driven display with hardware brightness and a tunable color palette
 - **Weather:** current conditions with an animated icon and a 5-day forecast for up to 8 cities
-- **Clock with date:** a Matrix theme of green rain streaming behind large digits, in any of your cities' time zones
+- **Clock with date:** eight themes - Matrix rain, split-flap, retro LED, Pong, Tetris, the real sky, an analog face and a little platform game - in any of your cities' time zones
 - **Mix and match:** tickers, weather and clock in rotation, or any one on its own
 - **Christmas theme:** falling snow that settles on the chart, a snowman or a tree, and Santa flying past now and then
 
@@ -151,7 +151,20 @@ Each city gets two screens: **now** - an animated icon, the temperature, today's
 
 On the **Clock** tab, pick a **Theme**, the **Time zone** - one of your weather cities, so add one on the Weather tab first - and how many **Seconds on screen** it gets between the other parts. Then tick **clock** under **Show** on the Display tab, and Save.
 
-The clock shows the time in large digits with the date under it, `MON 24 NOV`, in 24-hour time; the colon blinks with the seconds. The **matrix** theme streams green rain down the panel behind them. With no city it shows UTC and says so.
+The clock shows the time and the date in 24-hour time, in a choice of themes. Changing the theme applies to the panel at once while the clock is showing, so they can be compared live:
+
+| Theme | What it looks like |
+| --- | --- |
+| matrix | green rain streaming down behind large pale digits |
+| flip | split-flap cards; a changing digit folds down |
+| retro | a red seven-segment alarm clock, unlit segments faintly showing |
+| pong | two paddles playing on their own, the score being the hours and minutes |
+| tetris | each digit built from falling blocks whenever it changes |
+| sky | the sky outside: real sunrise and sunset, sun and moon arcing over hills, stars at night |
+| analog | a round face with a sweeping second hand, and the weekday, day and month beside it |
+| platformer | a plumber runs in, jumps and hits a "?" box, chases the mushroom out of it and grows |
+
+With no city the clock shows UTC and says so.
 
 ### Choosing a layout
 
@@ -312,6 +325,7 @@ Power save used to be applied only when WiFi joined, so saving a change to it di
 | POST | `/api/mode` | live display mode, not persisted; the web page's mode picker uses it, so a mode applies as soon as it is chosen |
 | POST | `/api/theme` | live theme, `none` or `snow`, not persisted - the same arrangement as the mode |
 | POST | `/api/santa` | send Santa across on the next frame, while the snow theme is on |
+| POST | `/api/clocktheme` | live clock theme, not persisted - the same arrangement as the mode |
 | POST | `/api/show` | live `{"tickers":bool, "weather":bool, "clock":bool}`, not persisted - the same arrangement as the mode; all three off is refused |
 | GET | `/api/weather` | the weather the device last fetched, per city |
 | GET / POST | `/api/palette` | live colour overrides by name, not persisted - the config's `palette` is what persists |
@@ -597,11 +611,22 @@ Measured with two cities: a fetch arrives about 3 s after a save, a weather fram
 
 ## Clock
 
-The clock is a theme on a common frame: the time in the 5x7 font at double size, `16:17` filling 59 of the 64 columns, and the date in the small font under it. Both have a one-pixel black outline, so whatever the theme draws behind them stops short of the figures. The colon blinks with the seconds.
+Every theme gets the same `ClockTime` - the clock city's local hour, minute, second and fraction of a second, the date, and that day's sunrise and sunset - and draws the whole panel itself. They share the 5x7 font's digit shapes, kept as a small table (`DIG5`) so the themes that build digits out of something else - cards, blocks, the analog date - can scale or rebuild them.
 
-The time is the clock city's. The device keeps UTC from SNTP, and every Open-Meteo answer carries the city's `utc_offset_seconds`, which follows daylight saving - so there is no time zone table and no POSIX TZ string to get wrong. That is why the weather fetch also runs when only the clock is on. With no city, or before its first fetch, the clock shows UTC and adds `UTC` to the date; before SNTP has set the clock it shows `--:--`. It is stored as `clockTheme`, `clockSec` and `clockCity` (an index into `cities`).
+The time is the clock city's. The device keeps UTC from SNTP, and every Open-Meteo answer carries the city's `utc_offset_seconds`, which follows daylight saving - so there is no time zone table and no POSIX TZ string to get wrong. That is why the weather fetch also runs when only the clock is on, and it now asks for each city's sunrise and sunset too, for the sky. With no city, or before its first fetch, the clock shows UTC and adds `UTC` to the date; before SNTP has set the clock it shows `--:--`. It is stored as `clockTheme`, `clockSec` and `clockCity` (an index into `cities`); an unknown theme loads as matrix.
 
-**matrix** is green rain: each column has at most one drop, a near-white head with a tail fading to dark green on a square curve, 5-14 rows long, falling at 10-26 rows a second, with a pause of up to 2.5 s before the next. It starts mid-flow, about half the columns already raining. Drops move by real time, like the snow. A frame takes about 5.4 ms against a 33 ms budget at 30 fps - most of it the outlines, which draw each string nine times.
+Every animation runs on real time rather than a step per frame, and a theme starts from its beginning whenever the clock comes up or the theme changes.
+
+- **matrix:** each column has at most one drop, a near-white head with a tail fading to dark green on a square curve, 5-14 rows long, falling at 10-26 rows a second, with a pause of up to 2.5 s before the next. It starts mid-flow. The digits are the 5x7 font doubled, with a one-pixel black outline so the rain stops short of them.
+- **flip:** a changing digit's card folds in two steps of 0.2 s - the old top half squashes down toward the split, uncovering the new top half, then the new bottom half unfolds over the old one. Each card is drawn pixel by pixel from the digit table, so a half-folded card is just a squashed range of rows.
+- **retro:** seven-segment digits 11x22 with 2-pixel segments, unlit ones drawn in a dim red, and a colon that blinks with the seconds.
+- **pong:** the hours are the left score and the minutes the right. When the minute turns the left paddle heads away from the ball and the right side scores; when the hour turns, the right paddle does. Any other time a paddle never misses - it is moved under the ball, which only ever takes a pixel or two - and the score on screen only catches up with the clock when a point is scored.
+- **tetris:** when a digit changes it clears and its 2x2 cells drop in one at a time, bottom row first, at 90 rows a second. Cells are colored four at a time, so the digit looks stacked from tetrominoes.
+- **sky:** an hour either side of sunrise blends night to dawn to day, and an hour either side of sunset day to dusk to night, from the clock city's real times. The sun crosses from horizon to horizon through the day and the moon through the night, stars twinkle once it is dark, over two sine waves of hills. Without sunrise and sunset it assumes six and six.
+- **analog:** hour, minute and a red second hand that sweeps, using the fraction of the second from `gettimeofday`; the weekday, the day of the month in doubled digits and the month on the right.
+- **platformer:** a 9.5-second script, every position worked out from the time into it. The plumber runs in, jumps and hits the box, which bumps and is spent; a mushroom rises out of it, slides off and drops, he chases it, flickers between sizes and grows, and runs off. The box sits at the right so he can grow beside it without the two overlapping. The art is drawn for this clock in the style of the old platform games, not copied from any.
+
+Frame times measured on the device: matrix 6.5 ms, sky 5.4, flip 3.1, tetris 1.3, retro 1.1, platformer 1.1, analog 1.0 and pong 0.8, against 33 ms at 30 fps.
 
 ### The rotation
 
@@ -634,7 +659,7 @@ It is RF, not bus contention. Changing edge speed at a fixed clock changed the r
 
 ## Status
 
-Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, chart and both scrolling tickers, tabbed web UI, Binance / Coinbase / CoinGecko / Yahoo adapters with batch fetching, pre-market and after-hours prices with market-state icons, symbol checks on save, up to 32 feeds, feed reordering and export/import, weather for up to 8 cities, a clock with a Matrix theme, a rotation through any of tickers, weather and clock, and the Christmas theme.
+Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, chart and both scrolling tickers, tabbed web UI, Binance / Coinbase / CoinGecko / Yahoo adapters with batch fetching, pre-market and after-hours prices with market-state icons, symbol checks on save, up to 32 feeds, feed reordering and export/import, weather for up to 8 cities, a clock with eight themes, a rotation through any of tickers, weather and clock, and the Christmas theme.
 
 Ideas, roughly in order of value:
 

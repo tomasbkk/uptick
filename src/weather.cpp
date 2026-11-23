@@ -74,6 +74,13 @@ static void parseCity(JsonObjectConst c, CityWeather& w)
     wd.lo   = toDegrees(lows[k]);
   }
   w.days      = n;
+
+  // Today's sunrise and sunset, local, for the clock's sky theme. They come
+  // as "2026-11-23T06:17"; only the time is wanted.
+  int hh, mm;
+  if (sscanf(day["sunrise"][0] | "", "%*d-%*d-%*dT%d:%d", &hh, &mm) == 2) w.sunrise = hh * 60 + mm;
+  if (sscanf(day["sunset"][0]  | "", "%*d-%*d-%*dT%d:%d", &hh, &mm) == 2) w.sunset  = hh * 60 + mm;
+
   w.valid     = true;
   w.fetchedMs = millis();
 }
@@ -85,7 +92,7 @@ static bool fetchAll(const String& units, uint8_t n, const float* lat, const flo
   url += "&longitude=";
   for (uint8_t i = 0; i < n; i++) url += String(lon[i], 4) + (i + 1 < n ? "," : "");
   url += "&current=temperature_2m,weather_code,is_day"
-         "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+         "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"
          "&timezone=auto&forecast_days=" + String(UPTICK_WX_DAYS);
   if (units == "f") url += "&temperature_unit=fahrenheit";
 
@@ -119,6 +126,8 @@ static bool fetchAll(const String& units, uint8_t n, const float* lat, const flo
   f["daily"]["weather_code"]        = true;
   f["daily"]["temperature_2m_max"]  = true;
   f["daily"]["temperature_2m_min"]  = true;
+  f["daily"]["sunrise"]             = true;
+  f["daily"]["sunset"]              = true;
 
   JsonDocument doc;
   const DeserializationError e =

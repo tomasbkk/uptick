@@ -1372,15 +1372,173 @@ static void drawWeather(const Config& cfg)
 
 // ---------------------------------------------------------------- clock
 
-// The clock, with the date under it, in a choice of themes - so far "matrix":
-// green rain streaming down the panel behind large pale digits. Each column
-// has at most one drop: a bright head with a tail fading to dark green, each
-// with its own speed and length, and a pause after it leaves before the next.
+// The clock, with the date, in a choice of themes. Every theme gets the same
+// ClockTime - the clock city's local time - and draws the whole panel itself.
 //
 // The time is the clock city's: the device keeps UTC from SNTP, and the city's
 // UTC offset comes with its weather, which follows daylight saving. With no
-// city, or before its first fetch, it shows UTC and says so.
+// city, or before its first fetch, it shows UTC and says so; before SNTP has
+// set the clock at all, the time reads --:--.
 
+struct ClockTime
+{
+  bool    ok;        // false until SNTP has set the clock
+  bool    utc;       // no city offset was available
+  uint8_t h, m, s;
+  float   sub;       // fraction of the current second, for smooth hands
+  uint8_t wday, mday, mon;
+  int16_t sunrise;   // minutes after local midnight, -1 unknown
+  int16_t sunset;
+};
+
+static ClockTime clockNow(const Config& cfg)
+{
+  ClockTime ct;
+  memset(&ct, 0, sizeof(ct));
+  ct.sunrise = ct.sunset = -1;
+  ct.utc     = true;
+  if (!clockValid()) return ct;
+
+  int32_t off = 0;
+  if (cfg.cityCount)
+  {
+    const uint8_t i = cfg.clockCity < cfg.cityCount ? cfg.clockCity : 0;
+    WeatherLock lk;
+    if (g_weather[i].valid)
+    {
+      off        = g_weather[i].utcOffset;
+      ct.utc     = false;
+      ct.sunrise = g_weather[i].sunrise;
+      ct.sunset  = g_weather[i].sunset;
+    }
+  }
+
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  const time_t t = tv.tv_sec + off;
+  struct tm tm;
+  gmtime_r(&t, &tm);
+
+  ct.ok   = true;
+  ct.h    = tm.tm_hour;
+  ct.m    = tm.tm_min;
+  ct.s    = tm.tm_sec;
+  ct.sub  = tv.tv_usec / 1000000.0f;
+  ct.wday = tm.tm_wday % 7;
+  ct.mday = tm.tm_mday;
+  ct.mon  = tm.tm_mon % 12;
+  return ct;
+}
+
+static const char* const CLOCK_DOW[7]  = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+static const char* const CLOCK_MON[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+
+// "16:17", with a space for the colon on odd seconds when blink is set.
+static void clockHM(const ClockTime& ct, char* out, size_t n, bool blink)
+{
+  if (!ct.ok) { snprintf(out, n, "--:--"); return; }
+  snprintf(out, n, "%02d%c%02d", ct.h, (blink && (ct.s & 1)) ? ' ' : ':', ct.m);
+}
+
+// "MON 23 NOV", or "MON 23" short, with " UTC" when there was no city offset.
+static void clockDate(const ClockTime& ct, char* out, size_t n, bool shortForm)
+{
+  if (!ct.ok) { snprintf(out, n, "SETTING TIME"); return; }
+  if (shortForm) snprintf(out, n, "%s %d%s", CLOCK_DOW[ct.wday], ct.mday, ct.utc ? " UTC" : "");
+  else           snprintf(out, n, "%s %d %s%s", CLOCK_DOW[ct.wday], ct.mday, CLOCK_MON[ct.mon],
+                          ct.utc ? " UTC" : "");
+}
+
+// The digits the drawn themes build from: the 5x7 font's shapes, one byte a
+// row, leftmost column in bit 4. Flip, Tetris and the analog date scale or
+// rebuild them; the text themes use the font itself.
+static const uint8_t DIG5[10][7] = {
+  { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E },
+  { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
+  { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F },
+  { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E },
+  { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 },
+  { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E },
+  { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E },
+  { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
+  { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E },
+  { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C },
+};
+
+static bool digitBit(uint8_t d, uint8_t col, uint8_t row)
+{
+  return (DIG5[d % 10][row] >> (4 - col)) & 1;
+}
+
+static void drawDigit(int16_t x, int16_t y, uint8_t d, uint8_t scale, uint16_t c)
+{
+  for (uint8_t r = 0; r < 7; r++)
+    for (uint8_t k = 0; k < 5; k++)
+      if (digitBit(d, k, r)) matrix->fillRect(x + k * scale, y + r * scale, scale, scale, c);
+}
+
+// Text with a one-pixel black outline, so whatever a theme draws behind it
+// stops short of the figures. size 2 is the 5x7 font doubled - the blocky
+// clock digits.
+static void drawOutlined(int16_t x, int16_t yTop, const char* s, uint8_t size, uint16_t c)
+{
+  matrix->setFont(NULL);
+  matrix->setTextSize(size);
+  for (int8_t dy = -1; dy <= 1; dy++)
+    for (int8_t dx = -1; dx <= 1; dx++)
+    {
+      if (!dx && !dy) continue;
+      matrix->setTextColor(0);
+      matrix->setCursor(x + dx, yTop + dy);
+      matrix->print(s);
+    }
+  matrix->setTextColor(c);
+  matrix->setCursor(x, yTop);
+  matrix->print(s);
+  matrix->setTextSize(1);
+}
+
+static void drawTinyOutlined(int16_t x, int16_t yTop, const char* s, uint16_t c)
+{
+  for (int8_t dy = -1; dy <= 1; dy++)
+    for (int8_t dx = -1; dx <= 1; dx++)
+      if (dx || dy) drawTiny(x + dx, yTop + dy, s, 0);
+  drawTiny(x, yTop, s, c);
+}
+
+static void drawTinyCentered(int16_t yTop, const char* s, uint16_t c)
+{
+  drawTiny((PANEL_W - tinyWidth(s)) / 2, yTop, s, c);
+}
+
+// Seconds since the last call, capped so a pause does not jump the animation.
+static float clockDt(uint32_t& lastUs)
+{
+  const uint32_t nowUs = micros();
+  float dt = (nowUs - lastUs) / 1000000.0f;
+  lastUs = nowUs;
+  if (dt > 0.1f) dt = 0.1f;
+  return dt;
+}
+
+// The themes, in the order the web page lists them.
+enum : uint8_t { CT_MATRIX, CT_FLIP, CT_RETRO, CT_PONG, CT_TETRIS, CT_SKY, CT_ANALOG, CT_PLATFORMER,
+                 CT_COUNT };
+static const char* const CLOCK_THEMES[CT_COUNT] = {
+  "matrix", "flip", "retro", "pong", "tetris", "sky", "analog", "platformer"
+};
+
+uint8_t displayClockThemeCount()           { return CT_COUNT; }
+const char* displayClockThemeName(uint8_t i) { return i < CT_COUNT ? CLOCK_THEMES[i] : ""; }
+
+static const uint8_t CLOCK_FPS = 30;
+
+// ---------------------------------------------------------------- matrix
+
+// Green rain streaming down the panel behind large pale digits. Each column
+// has at most one drop: a near-white head with a tail fading to dark green,
+// its own speed and length, and a pause after it leaves before the next.
 struct Drop
 {
   float   y;       // the head's row; the tail runs up from it
@@ -1391,9 +1549,7 @@ struct Drop
 };
 
 static Drop     s_rain[PANEL_W];
-static bool     s_rainReady  = false;
 static uint32_t s_rainLastUs = 0;
-static const uint8_t CLOCK_FPS = 30;
 
 static void dropStart(Drop& d)
 {
@@ -1405,7 +1561,7 @@ static void dropStart(Drop& d)
 
 // Starts mid-flow rather than from an empty panel: about half the columns
 // already have a drop somewhere on them.
-static void rainReset()
+static void matrixReset()
 {
   for (Drop& d : s_rain)
   {
@@ -1421,17 +1577,11 @@ static void rainReset()
     }
   }
   s_rainLastUs = micros();
-  s_rainReady  = true;
 }
 
-static void drawRain()
+static void __attribute__((noinline)) clockMatrix(const ClockTime& ct)
 {
-  if (!s_rainReady) rainReset();
-
-  const uint32_t nowUs = micros();
-  float dt = (nowUs - s_rainLastUs) / 1000000.0f;
-  s_rainLastUs = nowUs;
-  if (dt > 0.1f) dt = 0.1f;
+  const float dt = clockDt(s_rainLastUs);
 
   for (int16_t x = 0; x < PANEL_W; x++)
   {
@@ -1463,87 +1613,666 @@ static void drawRain()
       matrix->drawPixel(x, y, col(0, (uint8_t)(40 + 200 * f * f), (uint8_t)(10 + 40 * f * f)));
     }
   }
+
+  char hm[8], date[20];
+  clockHM(ct, hm, sizeof(hm), true);
+  clockDate(ct, date, sizeof(date), false);
+  // "16:17" doubled is 59 px - 12 a character less the blank column after
+  // the last - so it centres at x 3.
+  drawOutlined(3, 3, hm, 2, col(190, 255, 200));
+  drawTinyOutlined((PANEL_W - tinyWidth(date)) / 2, 24, date, col(0, 170, 70));
 }
 
-// Text with a one-pixel black outline, so the rain stops short of it and the
-// figures stay readable whatever falls behind them. size 2 is the 5x7 font
-// doubled, which is what gives the clock its blocky digits.
-static void drawOutlined(int16_t x, int16_t yTop, const char* s, uint8_t size, uint16_t c)
+// ---------------------------------------------------------------- flip
+
+// Split-flap: each digit on its own card, split across the middle. When one
+// changes, the top half of the old digit folds down over 0.2 s - squashing
+// toward the split, uncovering the new digit's top half behind it - and then
+// the new digit's bottom half folds down over the old one's.
+static const int16_t FLIP_X[4] = { 2, 16, 35, 49 };
+static const int16_t FLIP_Y    = 2;
+static const int16_t FLIP_W    = 13;
+static const int16_t FLIP_H    = 20;
+static const int16_t FLIP_SPLIT = 10;      // card row of the split
+static const uint32_t FLIP_MS  = 400;
+
+static uint8_t  s_flipCur[4], s_flipOld[4];
+static uint32_t s_flipAt[4];
+
+// One pixel of a card showing digit d: black at the corners and the split,
+// the digit doubled from (2,3), the card's own grey elsewhere. d 10 is a card
+// with no digit, for "--:--".
+static uint16_t flipPixel(uint8_t d, int16_t cx, int16_t cy)
 {
-  matrix->setFont(NULL);
-  matrix->setTextSize(size);
-  for (int8_t dy = -1; dy <= 1; dy++)
-    for (int8_t dx = -1; dx <= 1; dx++)
-    {
-      if (!dx && !dy) continue;
-      matrix->setTextColor(0);
-      matrix->setCursor(x + dx, yTop + dy);
-      matrix->print(s);
-    }
-  matrix->setTextColor(c);
-  matrix->setCursor(x, yTop);
-  matrix->print(s);
-  matrix->setTextSize(1);
+  if ((cx == 0 || cx == FLIP_W - 1) && (cy == 0 || cy == FLIP_H - 1)) return 0;
+  if (cy == FLIP_SPLIT) return 0;
+  if (d < 10 && cx >= 2 && cx < 12 && cy >= 3 && cy < 17 && digitBit(d, (cx - 2) / 2, (cy - 3) / 2))
+    return col(235, 235, 235);
+  return col(45, 45, 55);
 }
 
-static void drawTinyOutlined(int16_t x, int16_t yTop, const char* s, uint16_t c)
+static void flipReset(const ClockTime& ct)
 {
-  for (int8_t dy = -1; dy <= 1; dy++)
-    for (int8_t dx = -1; dx <= 1; dx++)
-      if (dx || dy) drawTiny(x + dx, yTop + dy, s, 0);
-  drawTiny(x, yTop, s, c);
-}
-
-// The clock city's local time. False until SNTP has set the clock; utc says
-// whether there was a city offset to apply.
-static bool clockNow(const Config& cfg, struct tm& out, bool& utc)
-{
-  if (!clockValid()) return false;
-
-  int32_t off = 0;
-  utc = true;
-  if (cfg.cityCount)
+  const uint8_t d[4] = { (uint8_t)(ct.h / 10), (uint8_t)(ct.h % 10), (uint8_t)(ct.m / 10), (uint8_t)(ct.m % 10) };
+  for (uint8_t i = 0; i < 4; i++)
   {
-    const uint8_t i = cfg.clockCity < cfg.cityCount ? cfg.clockCity : 0;
-    WeatherLock lk;
-    if (g_weather[i].valid) { off = g_weather[i].utcOffset; utc = false; }
+    s_flipCur[i] = s_flipOld[i] = ct.ok ? d[i] : 10;
+    s_flipAt[i]  = 0;
+  }
+}
+
+static void __attribute__((noinline)) clockFlip(const ClockTime& ct)
+{
+  const uint32_t now  = millis();
+  const uint8_t  d[4] = { (uint8_t)(ct.h / 10), (uint8_t)(ct.h % 10), (uint8_t)(ct.m / 10), (uint8_t)(ct.m % 10) };
+
+  for (uint8_t i = 0; i < 4; i++)
+  {
+    const uint8_t want = ct.ok ? d[i] : 10;
+    if (want != s_flipCur[i])
+    {
+      s_flipOld[i] = s_flipCur[i];
+      s_flipCur[i] = want;
+      s_flipAt[i]  = now | 1;              // never 0, which means "not flipping"
+    }
+
+    const int16_t x = FLIP_X[i];
+    float p = 1.0f;
+    if (s_flipAt[i] && now - s_flipAt[i] < FLIP_MS) p = (now - s_flipAt[i]) / (float)FLIP_MS;
+    const uint8_t nu = s_flipCur[i], old = s_flipOld[i];
+
+    for (int16_t cy = 0; cy < FLIP_H; cy++)
+      for (int16_t cx = 0; cx < FLIP_W; cx++)
+      {
+        uint16_t c;
+        if (p >= 1.0f)
+        {
+          c = flipPixel(nu, cx, cy);
+        }
+        else if (p < 0.5f)
+        {
+          // First half: the old top half is the flap, squashing toward the
+          // split; above it the new top half is already showing.
+          const int16_t h = (int16_t)lroundf(FLIP_SPLIT * (1.0f - p * 2.0f));
+          if (cy < FLIP_SPLIT - h)       c = flipPixel(nu, cx, cy);
+          else if (cy < FLIP_SPLIT)      c = flipPixel(old, cx, (cy - (FLIP_SPLIT - h)) * FLIP_SPLIT / h);
+          else                           c = flipPixel(old, cx, cy);
+        }
+        else
+        {
+          // Second half: the new bottom half unfolds down over the old one.
+          const int16_t span = FLIP_H - FLIP_SPLIT - 1;
+          const int16_t h    = (int16_t)lroundf(span * (p - 0.5f) * 2.0f);
+          if (cy <= FLIP_SPLIT)                c = flipPixel(nu, cx, cy);
+          else if (cy - FLIP_SPLIT - 1 < h)    c = flipPixel(nu, cx, FLIP_SPLIT + 1 + (cy - FLIP_SPLIT - 1) * span / h);
+          else                                 c = flipPixel(old, cx, cy);
+        }
+        matrix->drawPixel(x + cx, FLIP_Y + cy, c);
+      }
   }
 
-  const time_t t = time(nullptr) + off;
-  gmtime_r(&t, &out);
-  return true;
+  const uint16_t dot = col(235, 235, 235);
+  matrix->fillRect(31, 8, 2, 2, dot);
+  matrix->fillRect(31, 15, 2, 2, dot);
+
+  char date[20];
+  clockDate(ct, date, sizeof(date), false);
+  drawTinyCentered(25, date, col(150, 150, 160));
 }
 
-static const char* const CLOCK_DOW[7]  = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
-static const char* const CLOCK_MON[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-                                           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+// ---------------------------------------------------------------- retro
 
-static void drawClock(const Config& cfg)
+// A bedside alarm clock: red seven-segment digits with the unlit segments
+// faintly showing, and a colon that blinks with the seconds.
+static const char* const SEG7[10] = {
+  "abcdef", "bc", "abged", "abgcd", "fgbc", "afgcd", "afgedc", "abc", "abcdefg", "abcdfg"
+};
+
+static void drawSeven(int16_t x, int16_t y, int8_t d, uint16_t on, uint16_t off)
 {
-  matrix->fillScreen(0);
-  drawRain();
-
-  struct tm tm;
-  bool      utc = true;
-  char      hm[8], date[20];
-  if (clockNow(cfg, tm, utc))
+  struct R { char s; int8_t x, y, w, h; };
+  static const R SEGS[7] = {
+    { 'a', 2, 0, 7, 2 }, { 'b', 9, 2, 2, 8 }, { 'c', 9, 12, 2, 8 }, { 'd', 2, 20, 7, 2 },
+    { 'e', 0, 12, 2, 8 }, { 'f', 0, 2, 2, 8 }, { 'g', 2, 10, 7, 2 },
+  };
+  for (const R& r : SEGS)
   {
-    // The colon blinks with the seconds. A space in its place keeps the
-    // digits where they are.
-    snprintf(hm, sizeof(hm), "%02d%c%02d", tm.tm_hour, (tm.tm_sec & 1) ? ' ' : ':', tm.tm_min);
-    snprintf(date, sizeof(date), "%s %d %s%s", CLOCK_DOW[tm.tm_wday % 7], tm.tm_mday,
-             CLOCK_MON[tm.tm_mon % 12], utc ? " UTC" : "");
+    const bool lit = d >= 0 && strchr(SEG7[d], r.s);
+    matrix->fillRect(x + r.x, y + r.y, r.w, r.h, lit ? on : off);
+  }
+}
+
+static void __attribute__((noinline)) clockRetro(const ClockTime& ct)
+{
+  const uint16_t on  = col(255, 40, 30);
+  const uint16_t off = col(40, 5, 5);
+  static const int16_t X[4] = { 5, 18, 35, 48 };
+  const int8_t d[4] = { (int8_t)(ct.h / 10), (int8_t)(ct.h % 10), (int8_t)(ct.m / 10), (int8_t)(ct.m % 10) };
+  for (uint8_t i = 0; i < 4; i++) drawSeven(X[i], 1, ct.ok ? d[i] : -1, on, off);
+
+  const uint16_t colon = (ct.ok && !(ct.s & 1)) ? on : off;
+  matrix->fillRect(31, 7, 2, 2, colon);
+  matrix->fillRect(31, 15, 2, 2, colon);
+
+  char date[20];
+  clockDate(ct, date, sizeof(date), false);
+  drawTinyCentered(26, date, col(200, 30, 20));
+}
+
+// ---------------------------------------------------------------- pong
+
+// Two paddles playing on their own, the hours as the left score and the
+// minutes as the right. When the minute turns the left paddle lets the ball
+// through, so the right side scores; when the hour turns the right paddle
+// does. Otherwise neither ever misses.
+static float    s_pbx, s_pby, s_pvx, s_pvy;   // ball, its top left, and its speed
+static float    s_plY, s_prY;                 // paddle tops
+static int8_t   s_pongH = -1, s_pongM = -1;   // the score on screen
+static int8_t   s_pongMiss = 0;               // -1 left lets it through, 1 right does
+static uint32_t s_pongLastUs = 0;
+static const int16_t PADDLE_H = 6;
+
+static void pongServe(int8_t dir)
+{
+  s_pbx = 31;
+  s_pby = rnd(8, 22);
+  s_pvx = dir * 30.0f;
+  s_pvy = rnd(-14.0f, 14.0f);
+}
+
+static void pongReset(const ClockTime& ct)
+{
+  s_pongH = ct.h;
+  s_pongM = ct.m;
+  s_pongMiss = 0;
+  s_plY = s_prY = 13;
+  pongServe(1);
+  s_pongLastUs = micros();
+}
+
+// Moves a paddle toward where it wants to be, at a paddle's top speed.
+static void pongTrack(float& y, float target, float dt)
+{
+  const float step = 45.0f * dt;
+  if (target > y + step)      y += step;
+  else if (target < y - step) y -= step;
+  else                        y = target;
+  if (y < 0) y = 0;
+  if (y > PANEL_H - PADDLE_H) y = PANEL_H - PADDLE_H;
+}
+
+static void __attribute__((noinline)) clockPong(const ClockTime& ct)
+{
+  const float dt = clockDt(s_pongLastUs);
+
+  if (ct.ok && !s_pongMiss && (ct.h != s_pongH || ct.m != s_pongM))
+  {
+    if (ct.h != s_pongH) s_pongMiss = 1;      // the hour turned: the left side scores
+    else                 s_pongMiss = -1;     // the minute turned: the right side does
+  }
+
+  s_pbx += s_pvx * dt;
+  s_pby += s_pvy * dt;
+  if (s_pby < 0)  { s_pby = -s_pby;          s_pvy = -s_pvy; }
+  if (s_pby > 30) { s_pby = 60 - s_pby;      s_pvy = -s_pvy; }
+
+  // Each paddle follows the ball's centre - except one that is to miss,
+  // which heads for the far end of its side.
+  // (No float ?: here or below: see chartColumns for what that did to the
+  // compiler.)
+  const float aim  = s_pby + 1 - PADDLE_H / 2.0f;
+  float       away = 0;
+  if (s_pby < 13) away = PANEL_H - PADDLE_H;
+  float targetL = aim, targetR = aim;
+  if (s_pongMiss == -1) targetL = away;
+  if (s_pongMiss == 1)  targetR = away;
+  pongTrack(s_plY, targetL, dt);
+  pongTrack(s_prY, targetR, dt);
+
+  // Returns. A paddle that is not meant to miss never does: it is moved
+  // under the ball, which only ever takes a pixel or two.
+  if (s_pvx < 0 && s_pbx <= 2 && s_pongMiss != -1)
+  {
+    s_plY = constrain(aim, 0.0f, (float)(PANEL_H - PADDLE_H));
+    s_pbx = 4 - s_pbx;
+    s_pvx = -s_pvx;
+    s_pvy = constrain(s_pvy + rnd(-8.0f, 8.0f), -22.0f, 22.0f);
+  }
+  if (s_pvx > 0 && s_pbx >= 60 && s_pongMiss != 1)
+  {
+    s_prY = constrain(aim, 0.0f, (float)(PANEL_H - PADDLE_H));
+    s_pbx = 120 - s_pbx;
+    s_pvx = -s_pvx;
+    s_pvy = constrain(s_pvy + rnd(-8.0f, 8.0f), -22.0f, 22.0f);
+  }
+
+  // A point: the score catches up with the time, and the side that missed
+  // serves again.
+  if (s_pbx < -4 || s_pbx > PANEL_W + 2)
+  {
+    s_pongH = ct.h;
+    s_pongM = ct.m;
+    pongServe(s_pbx < 0 ? -1 : 1);
+    s_pongMiss = 0;
+  }
+
+  const uint16_t white = col(220, 220, 220);
+  for (int16_t y = 0; y < PANEL_H; y += 4) matrix->drawFastVLine(31, y, 2, col(70, 70, 70));
+
+  char h[4], m[4];
+  if (s_pongH >= 0 && ct.ok) { snprintf(h, sizeof(h), "%02d", s_pongH); snprintf(m, sizeof(m), "%02d", s_pongM); }
+  else                       { snprintf(h, sizeof(h), "--");            snprintf(m, sizeof(m), "--"); }
+  drawBig(31 - 3 - bigWidth(h), 1, h, white);
+  drawBig(31 + 4, 1, m, white);
+
+  char date[20];
+  clockDate(ct, date, sizeof(date), false);
+  drawTinyCentered(26, date, col(90, 90, 100));
+
+  matrix->drawFastVLine(1, (int16_t)s_plY, PADDLE_H, white);
+  matrix->drawFastVLine(62, (int16_t)s_prY, PADDLE_H, white);
+  matrix->fillRect((int16_t)s_pbx, (int16_t)s_pby, 2, 2, white);
+}
+
+// ---------------------------------------------------------------- tetris
+
+// Each digit built from falling blocks: when it changes, the old one clears
+// and the new one's 2x2 cells drop in one at a time, bottom row first, each
+// landing where it belongs. Cells are colored four at a time, so the digit
+// looks stacked from tetrominoes.
+struct TetDigit
+{
+  int8_t  d;          // the digit being built, -1 for none
+  uint8_t n;          // its cells
+  uint8_t landed;
+  float   fy;         // the falling cell's row
+  uint8_t cell[35];   // column + 5 * row, bottom row first
+};
+
+static TetDigit s_tet[4];
+static uint32_t s_tetLastUs = 0;
+static const int16_t TET_X[4] = { 3, 15, 39, 51 };
+static const int16_t TET_Y    = 3;
+
+static void tetStart(TetDigit& t, int8_t d)
+{
+  t.d = d; t.n = 0; t.landed = 0; t.fy = -2;
+  if (d < 0) return;
+  for (int8_t r = 6; r >= 0; r--)
+    for (uint8_t k = 0; k < 5; k++)
+      if (digitBit(d, k, r)) t.cell[t.n++] = k + 5 * r;
+}
+
+static void tetrisReset()
+{
+  for (TetDigit& t : s_tet) tetStart(t, -1);
+  s_tetLastUs = micros();
+}
+
+static uint16_t tetColor(uint8_t digitPos, uint8_t cellIdx)
+{
+  static const uint8_t C[7][3] = {
+    { 0, 220, 220 }, { 240, 220, 0 }, { 170, 0, 240 }, { 0, 220, 0 },
+    { 240, 0, 0 },   { 0, 80, 255 },  { 255, 140, 0 },
+  };
+  const uint8_t* c = C[(digitPos * 2 + cellIdx / 4) % 7];
+  return col(c[0], c[1], c[2]);
+}
+
+static void __attribute__((noinline)) clockTetris(const ClockTime& ct)
+{
+  const float  dt   = clockDt(s_tetLastUs);
+  const int8_t d[4] = { (int8_t)(ct.h / 10), (int8_t)(ct.h % 10), (int8_t)(ct.m / 10), (int8_t)(ct.m % 10) };
+
+  for (uint8_t i = 0; i < 4; i++)
+  {
+    TetDigit& t = s_tet[i];
+    if (ct.ok && t.d != d[i]) tetStart(t, d[i]);
+
+    if (t.landed < t.n)
+    {
+      const uint8_t c      = t.cell[t.landed];
+      const float   target = TET_Y + (c / 5) * 2;
+      t.fy += 90.0f * dt;
+      if (t.fy >= target) { t.landed++; t.fy = -2; }
+      else matrix->fillRect(TET_X[i] + (c % 5) * 2, (int16_t)t.fy, 2, 2, tetColor(i, t.landed));
+    }
+
+    for (uint8_t k = 0; k < t.landed; k++)
+    {
+      const uint8_t c = t.cell[k];
+      matrix->fillRect(TET_X[i] + (c % 5) * 2, TET_Y + (c / 5) * 2, 2, 2, tetColor(i, k));
+    }
+  }
+
+  const uint16_t dot = col(200, 200, 200);
+  matrix->fillRect(31, 7, 2, 2, dot);
+  matrix->fillRect(31, 13, 2, 2, dot);
+
+  char date[20];
+  clockDate(ct, date, sizeof(date), false);
+  drawTinyCentered(24, date, col(120, 120, 140));
+}
+
+// ---------------------------------------------------------------- sky
+
+// The sky as it is outside: the colors follow the clock city's real sunrise
+// and sunset, from the weather fetch, through dawn and dusk. The sun arcs
+// from one horizon to the other through the day, the moon and the stars
+// through the night, over a line of dark hills.
+struct SkyKey { uint8_t top[3], bot[3]; };
+static const SkyKey SKY_NIGHT = { {  0,  0, 12 }, {   5,   5, 35 } };
+static const SkyKey SKY_DAWN  = { { 30, 20, 80 }, { 220,  90, 40 } };
+static const SkyKey SKY_DAY   = { {  0, 30,110 }, {  30,  90,170 } };
+static const SkyKey SKY_DUSK  = { { 20, 10, 70 }, { 200,  70, 30 } };
+
+static uint8_t mix8(uint8_t a, uint8_t b, float f) { return (uint8_t)(a + (b - a) * f); }
+
+static void skyBlend(const SkyKey& a, const SkyKey& b, float f, SkyKey& out)
+{
+  for (uint8_t k = 0; k < 3; k++)
+  {
+    out.top[k] = mix8(a.top[k], b.top[k], f);
+    out.bot[k] = mix8(a.bot[k], b.bot[k], f);
+  }
+}
+
+static void __attribute__((noinline)) clockSky(const ClockTime& ct)
+{
+  // Six and six when no city has said otherwise.
+  const int16_t rise = ct.sunrise >= 0 ? ct.sunrise : 360;
+  const int16_t set  = ct.sunset  >= 0 ? ct.sunset  : 1080;
+  const float   m    = ct.h * 60 + ct.m + ct.s / 60.0f;
+
+  // An hour either side of sunrise goes night to dawn to day; an hour either
+  // side of sunset, day to dusk to night.
+  SkyKey k = SKY_NIGHT;
+  if (m >= rise - 60 && m < rise)      skyBlend(SKY_NIGHT, SKY_DAWN, (m - (rise - 60)) / 60.0f, k);
+  else if (m >= rise && m < rise + 60) skyBlend(SKY_DAWN, SKY_DAY, (m - rise) / 60.0f, k);
+  else if (m >= rise + 60 && m < set - 60) k = SKY_DAY;
+  else if (m >= set - 60 && m < set)   skyBlend(SKY_DAY, SKY_DUSK, (m - (set - 60)) / 60.0f, k);
+  else if (m >= set && m < set + 60)   skyBlend(SKY_DUSK, SKY_NIGHT, (m - set) / 60.0f, k);
+
+  for (int16_t y = 0; y < PANEL_H; y++)
+  {
+    const float f = y / (float)(PANEL_H - 1);
+    matrix->drawFastHLine(0, y, PANEL_W, col(mix8(k.top[0], k.bot[0], f), mix8(k.top[1], k.bot[1], f),
+                                             mix8(k.top[2], k.bot[2], f)));
+  }
+
+  const bool day = m >= rise && m < set;
+  if (day)
+  {
+    const float f = (m - rise) / (float)(set - rise);
+    matrix->fillCircle(4 + (int16_t)(f * 56), 24 - (int16_t)(sinf(f * 3.1416f) * 20), 3, col(255, 200, 40));
   }
   else
   {
-    snprintf(hm, sizeof(hm), "--:--");
-    snprintf(date, sizeof(date), "SETTING TIME");
+    // The night runs from sunset to the next sunrise, across midnight.
+    const float len   = 1440 - (set - rise);
+    float       since = m - set;
+    if (m < set) since += 1440;
+    const float f = since / len;
+
+    // Stars only once it is properly dark, each twinkling on its own beat.
+    if (m >= set + 40 || m < rise - 40)
+    {
+      static const int8_t STARS[9][2] = { { 5, 3 }, { 20, 9 }, { 44, 2 }, { 58, 7 }, { 33, 14 },
+                                          { 9, 18 }, { 52, 17 }, { 27, 4 }, { 14, 11 } };
+      const uint32_t t = millis() / 400;
+      for (uint8_t i = 0; i < 9; i++)
+        if ((t + i * 7) % 11) matrix->drawPixel(STARS[i][0], STARS[i][1], col(200, 200, 220));
+    }
+    // A crescent drawn pixel by pixel - the disc, less a second disc offset
+    // up and right. Covering it with a sky-colored disc instead left a dark
+    // patch, since the sky is a gradient and no one color matches it.
+    const int16_t mx = 4 + (int16_t)(f * 56), my = 24 - (int16_t)(sinf(f * 3.1416f) * 20);
+    for (int16_t dy = -3; dy <= 3; dy++)
+      for (int16_t dx = -3; dx <= 3; dx++)
+        if (dx * dx + dy * dy <= 10 && (dx - 2) * (dx - 2) + (dy + 1) * (dy + 1) > 10)
+          matrix->drawPixel(mx + dx, my + dy, col(230, 225, 170));
   }
 
-  // "16:17" doubled is 59 px - the 5x7 font advances 6 px a character, 12 at
-  // size 2, less the blank column after the last - so it centres at x 3.
-  drawOutlined(3, 3, hm, 2, col(190, 255, 200));
-  drawTinyOutlined((PANEL_W - tinyWidth(date)) / 2, 24, date, col(0, 170, 70));
+  // Hills, fixed: two sine waves make a skyline that never looks ruled.
+  const uint16_t hill = day ? col(10, 40, 15) : col(3, 12, 5);
+  for (int16_t x = 0; x < PANEL_W; x++)
+  {
+    const int16_t h = 29 - (int16_t)(2 + 2 * sinf(x / 6.0f) + sinf(x / 2.3f));
+    matrix->drawFastVLine(x, h, PANEL_H - h, hill);
+  }
+
+  char hm[8], date[20];
+  clockHM(ct, hm, sizeof(hm), true);
+  clockDate(ct, date, sizeof(date), false);
+  drawOutlined(3, 3, hm, 2, col(255, 255, 255));
+  drawTinyCentered(21, date, col(230, 230, 240));
+}
+
+// ---------------------------------------------------------------- analog
+
+// A round face on the left, hour, minute and a sweeping red second hand;
+// the weekday, the day of the month and the month on the right.
+static void __attribute__((noinline)) clockAnalog(const ClockTime& ct)
+{
+  const int16_t cx = 15, cy = 15;
+  matrix->drawCircle(cx, cy, 15, col(50, 50, 60));
+  for (uint8_t k = 0; k < 12; k++)
+  {
+    const float a = k * 0.5236f - 1.5708f;
+    const bool  q = (k % 3) == 0;
+    const uint16_t c = q ? col(220, 220, 220) : col(120, 120, 130);
+    matrix->drawPixel(cx + (int16_t)lroundf(cosf(a) * 13), cy + (int16_t)lroundf(sinf(a) * 13), c);
+    if (q) matrix->drawPixel(cx + (int16_t)lroundf(cosf(a) * 12), cy + (int16_t)lroundf(sinf(a) * 12), c);
+  }
+
+  if (ct.ok)
+  {
+    auto hand = [&](float turns, int16_t len, uint16_t c)
+    {
+      const float a = turns * 6.2832f - 1.5708f;
+      matrix->drawLine(cx, cy, cx + (int16_t)lroundf(cosf(a) * len), cy + (int16_t)lroundf(sinf(a) * len), c);
+    };
+    const float sec = ct.s + ct.sub;
+    hand(((ct.h % 12) + ct.m / 60.0f) / 12.0f, 7, col(240, 240, 240));
+    hand((ct.m + sec / 60.0f) / 60.0f, 11, col(240, 240, 240));
+    hand(sec / 60.0f, 12, col(255, 40, 30));
+  }
+  matrix->drawPixel(cx, cy, col(255, 40, 30));
+
+  // The right half is 31 columns from x 33.
+  if (!ct.ok) { drawTiny(36, 13, "SYNC", C_DIM()); return; }
+  const char* dow = CLOCK_DOW[ct.wday];
+  drawBig(33 + (31 - bigWidth(dow)) / 2, 2, dow, C_LABEL());
+
+  const uint8_t d1 = ct.mday / 10, d2 = ct.mday % 10;
+  const int16_t w  = d1 ? 22 : 10;
+  const int16_t x  = 33 + (31 - w) / 2;
+  if (d1) drawDigit(x, 11, d1, 2, col(255, 255, 255));
+  drawDigit(d1 ? x + 12 : x, 11, d2, 2, col(255, 255, 255));
+
+  if (ct.utc) drawTiny(33 + (31 - tinyWidth("UTC")) / 2, 27, "UTC", C_DIM());
+  else        drawTiny(33 + (31 - tinyWidth(CLOCK_MON[ct.mon])) / 2, 27, CLOCK_MON[ct.mon], col(150, 150, 160));
+}
+
+// ---------------------------------------------------------------- platformer
+
+// A little plumber in a red cap runs in along a brick ground, jumps and hits
+// a "?" box with his head; a mushroom rises out of it, slides off and drops,
+// and he chases it down and grows - then runs off, and it starts again. The
+// art is drawn for this clock in the style of the old platform games, not
+// copied from any of them.
+//
+// Each round is a script played from its start time, every position worked
+// out from the seconds into it, so the frame rate cannot change its pace.
+static const char* const PL_SMALL[2][8] = {
+  { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".SSSSSSS", "..RBBR..", ".BBBBBB.", ".BB..BB.", "KK....KK" },
+  { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".SSSSSSS", "..RBBR..", "..BBBB..", "..BBBB..", "..KKKK.." },
+};
+static const char* const PL_BIG[2][16] = {
+  { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".KSSSSSS", ".SSSSSS.", "..SSSS..", ".RRBBRR.", "RRRBBRRR",
+    "SSRBBRSS", "SSBYBYSS", "..BBBB..", ".BBBBBB.", ".BBB.BBB", ".BB...BB", "KKK...KK", "KKK..KKK" },
+  { "..RRRR..", ".RRRRRRR", ".KKSSES.", ".KSSSSSS", ".SSSSSS.", "..SSSS..", ".RRBBRR.", "RRRBBRRR",
+    "SSRBBRSS", "SSBYBYSS", "..BBBB..", "..BBBB..", "..BBBB..", "..BBBB..", "..KKKK..", "..KKKK.." },
+};
+static const char* const PL_MUSH[8] = {
+  "..RRRR..", ".RRWWRR.", "RRWWWWRR", "RWRRRRWR", "RRRRRRRR", ".TTETET.", ".TTTTTT.", "..TTTT..",
+};
+static const char* const PL_QBOX[8] = {
+  ".DDDDDD.", "DQQWWQQD", "DQWQQWQD", "DQQQQWQD", "DQQQWQQD", "DQQQQQQD", "DQQQWQQD", ".DDDDDD.",
+};
+static const char* const PL_USED[8] = {
+  ".DDDDDD.", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", "DUUUUUUD", ".DDDDDD.",
+};
+
+static uint16_t plColor(char c)
+{
+  switch (c)
+  {
+    case 'R': return col(220,  30,  30);   // cap, shirt, mushroom
+    case 'S': return col(255, 180, 120);   // skin
+    case 'K': return col(110,  50,  10);   // hair, shoes
+    case 'B': return col( 40,  70, 230);   // overalls
+    case 'Y': return col(255, 210,   0);   // buttons
+    case 'W': return col(255, 255, 255);   // spots, "?"
+    case 'T': return col(240, 210, 160);   // mushroom stem
+    case 'E': return col( 20,  20,  20);   // eyes
+    case 'Q': return col(250, 160,   0);   // box
+    case 'D': return col(130,  60,  10);   // box edge
+    case 'U': return col(150,  80,  30);   // spent box
+  }
+  return 0;
+}
+
+static void plSprite(int16_t x, int16_t y, const char* const* rows, uint8_t h)
+{
+  for (uint8_t r = 0; r < h; r++)
+    for (uint8_t c = 0; c < 8; c++)
+    {
+      const char ch = rows[r][c];
+      if (ch == '.') continue;
+      const int16_t px = x + c, py = y + r;
+      if (px >= 0 && px < PANEL_W && py >= 0 && py < PANEL_H) matrix->drawPixel(px, py, plColor(ch));
+    }
+}
+
+static uint32_t s_plStart = 0;
+
+static const int16_t PL_BOX_X  = 44;
+static const int16_t PL_BOX_Y  = 8;
+static const int16_t PL_FLOOR  = 28;       // first row of the ground
+static const float   PL_RUN    = 18.0f;    // px per second
+static const float   PL_ROUND  = 9.5f;     // seconds, pause included
+
+static void __attribute__((noinline)) clockPlatformer(const ClockTime& ct)
+{
+  float t = (millis() - s_plStart) / 1000.0f;
+  if (t >= PL_ROUND) { s_plStart = millis(); t = 0; }
+
+  // The script. Small, he is 8 rows tall and stands at y 20; big, 16 and 12.
+  const float HIT = 3.2f;                   // head meets the box
+  bool    big   = false;
+  bool    run   = false;
+  int16_t hx    = -8, hy = PL_FLOOR - 8;
+  if (t < 2.9f)       { hx = (int16_t)(-8 + PL_RUN * t); run = true; }
+  else if (t < 3.5f)  { hx = PL_BOX_X; hy -= (int16_t)lroundf(4 * sinf((t - 2.9f) / 0.6f * 3.1416f)); }
+  else if (t < 5.4f)  { hx = PL_BOX_X; }
+  else if (t < 5.86f) { hx = (int16_t)(PL_BOX_X + PL_RUN * (t - 5.4f)); run = true; }
+  else if (t < 6.76f)
+  {
+    // Caught it: flickering between sizes, as growing goes in these games.
+    hx  = 52;
+    big = ((int)((t - 5.86f) / 0.1f)) & 1;
+  }
+  else                { hx = (int16_t)(52 + PL_RUN * (t - 6.76f)); big = true; run = true; }
+
+  // The box: bumped up two rows just after the hit, spent from then on.
+  const bool    spent = t >= HIT;
+  const int16_t boxY  = (t >= HIT && t < HIT + 0.15f) ? PL_BOX_Y - 2 : PL_BOX_Y;
+
+  // The mushroom: rises out of the box top, slides off its right edge,
+  // drops to the ground and keeps going, until he catches it.
+  bool    mush = false;
+  int16_t mx = PL_BOX_X, my = PL_BOX_Y;
+  if (t >= HIT && t < 5.86f)
+  {
+    mush = true;
+    if (t < 3.8f)       { my = PL_BOX_Y - (int16_t)(8 * (t - HIT) / 0.6f); }
+    else if (t < 4.8f)  { my = PL_BOX_Y - 8; mx = (int16_t)(PL_BOX_X + 8 * (t - 3.8f)); }
+    else if (t < 5.3f)  { const float f = (t - 4.8f) / 0.5f;
+                          my = PL_BOX_Y - 8 + (int16_t)((PL_FLOOR - 8 - (PL_BOX_Y - 8)) * f * f);
+                          mx = (int16_t)(52 + 8 * (t - 4.8f)); }
+    else                { my = PL_FLOOR - 8; mx = (int16_t)(56 + 8 * (t - 5.3f)); }
+  }
+
+  // The time first, so the mushroom rises in front of nothing and the
+  // plumber passes in front of the date.
+  char hm[8], date[16];
+  clockHM(ct, hm, sizeof(hm), true);
+  clockDate(ct, date, sizeof(date), true);
+  drawBig(2, 1, hm, col(255, 255, 255));
+  drawTiny(2, 10, date, C_DIM());
+
+  // The ground: a band of bricks with mortar lines, staggered row to row.
+  for (int16_t y = PL_FLOOR; y < PANEL_H; y++) matrix->drawFastHLine(0, y, PANEL_W, col(190, 90, 30));
+  matrix->drawFastHLine(0, PL_FLOOR, PANEL_W, col(240, 150, 80));
+  matrix->drawFastHLine(0, PL_FLOOR + 2, PANEL_W, col(90, 35, 5));
+  for (int16_t x = 0; x < PANEL_W; x += 8)
+  {
+    matrix->drawFastVLine(x, PL_FLOOR, 2, col(90, 35, 5));
+    matrix->drawFastVLine(x + 4, PL_FLOOR + 3, 1, col(90, 35, 5));
+  }
+
+  // The mushroom is drawn before the box, so while it rises it comes out
+  // from behind the box's top edge rather than in front of it.
+  if (mush) plSprite(mx, my, PL_MUSH, 8);
+  plSprite(PL_BOX_X, boxY, spent ? PL_USED : PL_QBOX, 8);
+
+  const uint8_t frame = run ? ((uint8_t)(t / 0.12f) & 1) : 1;
+  if (big) plSprite(hx, PL_FLOOR - 16, PL_BIG[frame], 16);
+  else     plSprite(hx, hy, PL_SMALL[frame], 8);
+}
+
+// ---------------------------------------------------------------- clock face
+
+static uint8_t s_clockTheme = 0xFF;          // the theme last drawn, to reset on a change
+
+static uint8_t clockThemeIndex(const Config& cfg)
+{
+  for (uint8_t i = 0; i < CT_COUNT; i++)
+    if (cfg.clockTheme == CLOCK_THEMES[i]) return i;
+  return CT_MATRIX;
+}
+
+// Starts a theme afresh: called when the clock comes up and when the theme
+// changes, so each starts from its beginning rather than mid-animation.
+static void clockReset(const Config& cfg)
+{
+  const ClockTime ct = clockNow(cfg);
+  s_clockTheme = clockThemeIndex(cfg);
+  matrixReset();
+  flipReset(ct);
+  pongReset(ct);
+  tetrisReset();
+  s_plStart   = millis();
+}
+
+static void drawClock(const Config& cfg)
+{
+  if (clockThemeIndex(cfg) != s_clockTheme) clockReset(cfg);
+
+  const ClockTime ct = clockNow(cfg);
+  matrix->fillScreen(0);
+  switch (s_clockTheme)
+  {
+    case CT_FLIP:       clockFlip(ct);       break;
+    case CT_RETRO:      clockRetro(ct);      break;
+    case CT_PONG:       clockPong(ct);       break;
+    case CT_TETRIS:     clockTetris(ct);     break;
+    case CT_SKY:        clockSky(ct);        break;
+    case CT_ANALOG:     clockAnalog(ct);     break;
+    case CT_PLATFORMER: clockPlatformer(ct); break;
+    default:            clockMatrix(ct);     break;
+  }
 }
 
 // ---------------------------------------------------------------- screens
@@ -2211,6 +2940,7 @@ void displayTask(void* arg)
       s_wxCity = 0;
       s_wxScreen = 0;
       s_wxAt   = now;
+      if (s_seg == SEG_CLOCK) s_clockTheme = 0xFF;   // the theme starts from its beginning
       if (s_seg == SEG_TICKERS)
       {
         // The scrolling tickers restart through the change of animation

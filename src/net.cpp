@@ -286,6 +286,28 @@ static void handleWeather()
   sendJson(200, out);
 }
 
+// The clock's theme, live like the mode; Save keeps it.
+static void handleClockTheme()
+{
+  if (!http.hasArg("plain")) { sendErr(400, "empty body"); return; }
+
+  JsonDocument d;
+  if (deserializeJson(d, http.arg("plain"))) { sendErr(400, "bad json"); return; }
+
+  const String t = d["theme"] | "";
+  bool known = false;
+  for (uint8_t i = 0; i < displayClockThemeCount(); i++)
+    if (t == displayClockThemeName(i)) known = true;
+  if (!known) { sendErr(400, "unknown theme"); return; }
+
+  {
+    CfgLock lk;
+    g_cfg.clockTheme = t;
+    g_cfgRev++;
+  }
+  sendOk();
+}
+
 // Santa flies every few minutes on his own; this is for not having to wait.
 static void handleSanta()
 {
@@ -749,6 +771,7 @@ void netBegin()
   http.on("/api/theme",      HTTP_POST, handleTheme);
   http.on("/api/santa",      HTTP_POST, handleSanta);
   http.on("/api/show",       HTTP_POST, handleShow);
+  http.on("/api/clocktheme", HTTP_POST, handleClockTheme);
   http.on("/api/weather",    HTTP_GET,  handleWeather);
   http.on("/api/defaults",   HTTP_POST, handleDefaults);
   http.on("/api/apikey",     HTTP_POST, handleApiKey);

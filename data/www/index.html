@@ -176,8 +176,15 @@
     <div class="card">
       <h2>Clock</h2>
       <label>Theme</label>
-      <select id="clockTheme">
-        <option value="matrix">matrix - green rain</option>
+      <select id="clockTheme" onchange="liveClockTheme()">
+        <option value="matrix">matrix - green rain behind the digits</option>
+        <option value="flip">flip - split-flap cards</option>
+        <option value="retro">retro - red LED alarm clock</option>
+        <option value="pong">pong - the paddles keep the score</option>
+        <option value="tetris">tetris - digits built from falling blocks</option>
+        <option value="sky">sky - the real sky, sunrise to sunset</option>
+        <option value="analog">analog - a round face with the date</option>
+        <option value="platformer">platformer - a plumber, a box and a mushroom</option>
       </select>
       <label>Time zone</label>
       <select id="clockCity"></select>
@@ -432,7 +439,8 @@ async function loadConfig() {
   $('showTickers').checked = cfg.showTickers !== false;
   $('showWeather').checked = !!cfg.showWeather;
   $('showClock').checked   = !!cfg.showClock;
-  $('clockTheme').value    = 'matrix';
+  $('clockTheme').value    = cfg.clockTheme || 'matrix';
+  if (!$('clockTheme').value) $('clockTheme').value = 'matrix';
   $('clockSec').value      = cfg.clockSec || 10;
   $('weatherUnits').value = cfg.weatherUnits === 'f' ? 'f' : 'c';
   $('weatherSec').value   = cfg.weatherSec || 8;
@@ -856,6 +864,14 @@ function liveShow(box) {
   dirty();
   fetch('/api/show', { method:'POST', body: JSON.stringify(s) })
     .then(r => { if (!r.ok) toast('could not switch', true); });
+}
+
+// Like the mode, the theme applies to the panel at once - when the clock is
+// on screen - and Save keeps it.
+function liveClockTheme() {
+  dirty();
+  fetch('/api/clocktheme', { method:'POST', body: JSON.stringify({ theme: $('clockTheme').value }) })
+    .then(r => { if (!r.ok) toast('could not switch theme', true); });
 }
 
 // The clock's time zone is one of the weather cities'. The list follows the

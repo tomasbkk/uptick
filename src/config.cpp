@@ -261,7 +261,12 @@ bool configFromJson(const String& body, String& err)
   }
   if (!c.showTickers && !c.showWeather && !c.showClock) c.showTickers = true;   // never a blank panel
 
-  c.clockTheme = "matrix";                 // the only theme so far; unknown ones load as it
+  // Unknown themes - a backup from a later version - load as matrix.
+  c.clockTheme = String(d["clockTheme"] | "matrix");
+  bool knownTheme = false;
+  for (uint8_t i = 0; i < displayClockThemeCount(); i++)
+    if (c.clockTheme == displayClockThemeName(i)) knownTheme = true;
+  if (!knownTheme) c.clockTheme = "matrix";
   c.clockSec   = constrain((int)(d["clockSec"] | 10), 3, 600);
   c.clockCity  = constrain((int)(d["clockCity"] | 0), 0, UPTICK_MAX_CITIES - 1);
   c.weatherUnits = (String(d["weatherUnits"] | "c") == "f") ? "f" : "c";
