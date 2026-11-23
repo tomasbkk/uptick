@@ -2235,6 +2235,8 @@ static void __attribute__((noinline)) clockPlatformer(const ClockTime& ct)
 // ---------------------------------------------------------------- clock face
 
 static uint8_t s_clockTheme = 0xFF;          // the theme last drawn, to reset on a change
+static bool    s_clockBack  = false;         // the clock has just come round again in the rotation
+static bool    s_pongLive   = false;         // a pong game is under way, to carry on with
 
 static uint8_t clockThemeIndex(const Config& cfg)
 {
@@ -2243,22 +2245,34 @@ static uint8_t clockThemeIndex(const Config& cfg)
   return CT_MATRIX;
 }
 
-// Starts a theme afresh: called when the clock comes up and when the theme
-// changes, so each starts from its beginning rather than mid-animation.
+// Starts the themes afresh: called when the clock comes round in the
+// rotation and when the theme changes, so each starts from its beginning
+// rather than mid-animation - Tetris builds its digits, the platformer plays
+// its scene from the top.
+//
+// Except pong, which is a game in progress rather than an animation: it
+// carries on where it left off, as if paused while the tickers had the panel.
+// The score catches up through its usual rule - a minute that turned while it
+// was away makes a side miss. Only the first time, or choosing pong again
+// after another theme, starts a new game.
 static void clockReset(const Config& cfg)
 {
   const ClockTime ct = clockNow(cfg);
-  s_clockTheme = clockThemeIndex(cfg);
+  const uint8_t   th = clockThemeIndex(cfg);
+  if (th != CT_PONG || !s_pongLive || th != s_clockTheme) pongReset(ct);
+  s_pongLive = (th == CT_PONG);
+
+  s_clockTheme = th;
+  s_clockBack  = false;
   matrixReset();
   flipReset(ct);
-  pongReset(ct);
   tetrisReset();
-  s_plStart   = millis();
+  s_plStart = millis();
 }
 
 static void drawClock(const Config& cfg)
 {
-  if (clockThemeIndex(cfg) != s_clockTheme) clockReset(cfg);
+  if (s_clockBack || clockThemeIndex(cfg) != s_clockTheme) clockReset(cfg);
 
   const ClockTime ct = clockNow(cfg);
   matrix->fillScreen(0);
@@ -2940,7 +2954,7 @@ void displayTask(void* arg)
       s_wxCity = 0;
       s_wxScreen = 0;
       s_wxAt   = now;
-      if (s_seg == SEG_CLOCK) s_clockTheme = 0xFF;   // the theme starts from its beginning
+      if (s_seg == SEG_CLOCK) s_clockBack = true;    // see clockReset
       if (s_seg == SEG_TICKERS)
       {
         // The scrolling tickers restart through the change of animation
