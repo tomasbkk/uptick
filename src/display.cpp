@@ -618,6 +618,7 @@ static void flakeSpawn(Flake& f, bool anywhere)
 }
 
 static void santaReset();   // below, with the rest of Santa
+static void decoReset();    // below, with the decorations
 
 static void snowReset()
 {
@@ -646,6 +647,7 @@ static void snowSurface(const int16_t* colY, const void* key)
     memset(s_pile, 0, sizeof(s_pile));
     s_meltAcc = 0;
     s_surfKey = key;
+    decoReset();
   }
   s_surf = colY;
 }
@@ -902,6 +904,138 @@ static void drawSanta()
   }
 }
 
+// ---------------------------------------------------------------- decorations
+
+// A snowman or a Christmas tree standing on the chart while it snows. Each
+// time a chart comes on screen one of the two is picked at random, and it
+// stands wherever the chart leaves room for it - or is left out if nowhere
+// does.
+//
+// It stands on the lowest point of the ground under it, so it never floats;
+// where the ground under it is higher it overlaps the chart, which reads as
+// standing in front of a slope. Ground more uneven than DECO_UNEVEN would bury
+// too much of it, and its top may not reach the header rows, so those spots
+// do not count. Drawn after the chart: in front of the chart and the falling
+// snow, behind Santa.
+//
+// 10 rows tall: measured against a dozen real 64-bar charts, that and ground
+// no more than DECO_UNEVEN rows uneven finds room on about five charts in six.
+// At 12 rows it was half of them.
+//
+// Same format as Santa: a character per pixel, '.' transparent. 'K' is drawn
+// black on purpose - eyes and buttons are holes, and they must not show the
+// snow or the chart behind them.
+static const int16_t DECO_W      = 7;
+static const int16_t DECO_H      = 10;
+static const int16_t DECO_UNEVEN = 3;     // rows between the lowest and highest ground under it
+static const int16_t DECO_TOP    = 15;    // the blank row between the price and the chart
+
+static const char* const SNOWMAN[DECO_H] = {
+  "..RRR..",
+  ".RRRRR.",
+  ".WKWKW.",
+  ".WWWOO.",
+  "T.GGG.T",
+  ".TWWWT.",
+  "WWWKWWW",
+  "WWWWWWW",
+  "WWWKWWW",
+  ".WWWWW.",
+};
+
+// '1', '2' and '3' are the ornaments, which take turns through red, yellow and
+// blue so the tree twinkles.
+static const char* const TREE[DECO_H] = {
+  "...Y...",
+  "..YYY..",
+  "..G1G..",
+  ".GGGGG.",
+  "..GG3..",
+  ".G2GGG.",
+  "GGGG1GG",
+  ".GGGGG.",
+  "G3GGG2G",
+  "...T...",
+};
+
+enum : uint8_t { DECO_NONE, DECO_SNOWMAN, DECO_TREE };
+
+static uint8_t s_decoKind = DECO_NONE;
+static int16_t s_decoX    = -1;           // left column, -1 until a spot is found
+
+// A new chart came up: pick which of the two it gets, and find it a spot.
+static void decoReset()
+{
+  s_decoKind = rnd(0, 1) < 0.5f ? DECO_SNOWMAN : DECO_TREE;
+  s_decoX    = -1;
+}
+
+// The lowest ground under a footprint starting at x - the largest row number -
+// or -1 if the footprint is no place to stand.
+static int16_t decoGround(const int16_t* colY, int16_t x)
+{
+  int16_t lo = colY[x], hi = colY[x];
+  for (int16_t c = 1; c < DECO_W; c++)
+  {
+    if (colY[x + c] > lo) lo = colY[x + c];
+    if (colY[x + c] < hi) hi = colY[x + c];
+  }
+  if (lo - hi > DECO_UNEVEN)   return -1;
+  if (lo - DECO_H < DECO_TOP)  return -1;
+  return lo;
+}
+
+static uint16_t decoColor(char c, uint8_t twinkle)
+{
+  // The ornaments shift one color along every twinkle step.
+  if (c >= '1' && c <= '3') c = "RYL"[(c - '1' + twinkle) % 3];
+
+  switch (c)
+  {
+    case 'W': return col(255, 255, 255);   // snow
+    case 'R': return col(230,  20,  20);   // hat, ornament
+    case 'O': return col(255, 120,   0);   // carrot
+    case 'G': return col(  0, 150,  30);   // scarf, branches
+    case 'T': return col(120,  70,  30);   // arms, trunk
+    case 'Y': return col(255, 210,   0);   // star, ornament
+    case 'L': return col( 40,  90, 255);   // ornament
+  }
+  return 0;                                // 'K'
+}
+
+static void drawDecoration(const int16_t* colY)
+{
+  if (s_decoKind == DECO_NONE) return;
+
+  // Stays put while it still fits, so a chart that shifts a little on a new
+  // fetch does not send it hopping about. Otherwise a spot is picked at random
+  // from all that fit; one column in from either edge, so it never looks cut
+  // off.
+  int16_t ground = (s_decoX >= 0) ? decoGround(colY, s_decoX) : -1;
+  if (ground < 0)
+  {
+    int16_t fits[PANEL_W];
+    uint8_t n = 0;
+    for (int16_t x = 1; x + DECO_W < PANEL_W; x++)
+      if (decoGround(colY, x) >= 0) fits[n++] = x;
+    if (!n) { s_decoX = -1; return; }
+
+    s_decoX = fits[(uint8_t)rnd(0, n - 0.001f)];
+    ground  = decoGround(colY, s_decoX);
+  }
+
+  const char* const* spr     = (s_decoKind == DECO_SNOWMAN) ? SNOWMAN : TREE;
+  const uint8_t      twinkle = (uint8_t)((millis() / 600) % 3);
+  const int16_t      top     = ground - DECO_H;
+
+  for (int16_t r = 0; r < DECO_H; r++)
+    for (int16_t c = 0; c < DECO_W; c++)
+    {
+      const char ch = spr[r][c];
+      if (ch != '.') matrix->drawPixel(s_decoX + c, top + r, decoColor(ch, twinkle));
+    }
+}
+
 // ---------------------------------------------------------------- screens
 
 static void drawSetup()
@@ -1068,6 +1202,9 @@ static void drawSingleChart(const Config& cfg, const Feed& f, const Quote& q, bo
   drawChart(colY, PANEL_H - 1,
             chartUp ? C_FILL_UP()  : C_FILL_DOWN(),
             chartUp ? C_TRACE_UP() : C_TRACE_DOWN());
+
+  // A snowman or a tree standing on it, while it snows.
+  if (s_snowOn) drawDecoration(colY);
 }
 
 // Two ramps of decreasing component value, so the point where a colour stops

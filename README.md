@@ -322,6 +322,15 @@ Santa flies across every two to five minutes while it snows, the first time 20-4
 
 Unlike the snow he is drawn over everything, after the screen's own content. He is up for a few seconds at a time, and behind the figures he would be mostly hidden. He adds about 0.2 ms to a frame.
 
+Each time a chart comes on screen while it snows, it gets a snowman or a Christmas tree, picked at random, standing on the chart wherever there is room. Both are 7x10 sprites in the same format as Santa; `K` is drawn black rather than left transparent, so the snowman's eyes and buttons do not show the snow behind them, and the tree's three ornaments cycle through red, yellow and blue every 0.6 s so it twinkles.
+
+- It stands on the lowest ground under its seven columns, so it never floats; where the ground is higher it overlaps the chart, which reads as standing in front of a slope.
+- A spot counts only if the ground under it is no more than 3 rows uneven and its top stays below the price - row 15, the blank row above the chart, at the highest. If nowhere fits, that chart goes without.
+- It keeps its spot while the spot still fits, so a chart that shifts a little on a new fetch does not move it. Otherwise it is placed at random among the spots that fit, one column in from either edge.
+- It is drawn after the chart: in front of the chart and the falling snow, behind Santa.
+
+The size was measured rather than guessed. Against a dozen real 64-bar charts, a 10-row figure with that flatness rule finds room on about five charts in six; at 12 rows it was half of them, because every chart is scaled to fill all 16 rows and only its lower stretches leave the height.
+
 The chart is normally redrawn only when something changes. With a theme on it joins the tickers as an animated screen at 30 fps. Measured with snow, a frame takes about 2.6 ms on the chart with landing, 1.1 ms on the horizontal ticker and 1.8 ms on the vertical one (`tickerDrawUs` in `/api/status`).
 
 Adding the snow changed how GCC inlined `drawChart`, and the Xtensa compiler then failed with an internal compiler error (`insn does not satisfy its constraints`) on a float `?:` in the chart's scaling. That check is now an `if` outside the loop and `drawChart` is `noinline`. If the same error appears after some other change, look for a float conditional in a function that has just started being inlined.
