@@ -5,3 +5,6 @@
 
 # Feed exports from the web UI - personal configuration, not source.
 uptick-feeds*.json
+
+# Config backups taken with curl before a filesystem upload - personal settings.
+uptick-config*.json

@@ -1,6 +1,159 @@
 # uptick
 
-A small LED ticker: crypto prices with a chart, on a 64x32 HUB75 panel driven by an ESP32-S3.
+A desk ticker for crypto and stock prices on a 64x32 RGB LED panel, driven by an Adafruit Matrix Portal S3. Everything is set up from a web page the device serves on your network - no app, no account, and no API keys needed for the default sources.
+
+- **Three layouts:** one feed at a time with a price chart, a two-row horizontal scrolling ticker, or a vertical scrolling list
+- **Crypto and stocks:** Binance, Coinbase and CoinGecko for crypto; Yahoo Finance for stocks, ETFs, indices, futures and currencies, with pre-market and after-hours prices
+- **Up to 32 feeds**, checked against their source before they are saved, reorderable, and exportable to a file
+- **Flicker-free** DMA-driven display with hardware brightness and a tunable color palette
+- **Christmas theme:** falling snow that settles on the chart, a snowman or a tree, and Santa flying past now and then
+
+## What you need
+
+- [Adafruit Matrix Portal S3](https://www.adafruit.com/product/5778) - the firmware's pins and memory layout are this board's
+- A 64x32 HUB75 RGB panel with 1/16 scan. A P4 (256 x 128 mm) is what it was built on; any pitch works as long as it is 64x32 and 1/16 scan
+- A USB-C cable that carries data, not just charge
+- A 5 V USB-C supply, 2 A or more - see [Power](#power) before wiring the panel
+- A computer with [PlatformIO](https://platformio.org/) and git
+
+## Flashing
+
+### 1. Install the tools
+
+Either of these works:
+
+- **VS Code with the PlatformIO IDE extension** - install [VS Code](https://code.visualstudio.com/), then search the extensions for "PlatformIO IDE". Easiest if you have not used PlatformIO before.
+- **PlatformIO Core on the command line** - `pip install platformio`, then `pio` is the command used below.
+
+No board drivers are needed: the Matrix Portal S3 shows up as a standard USB serial device on Windows, macOS and Linux.
+
+### 2. Get the code
+
+```bash
+git clone https://github.com/tomasbkk/uptick.git
+```
+
+Or download the ZIP from GitHub and unpack it. In VS Code, open the `uptick` folder.
+
+### 3. Connect the board
+
+Plug the Matrix Portal S3 into the computer with the USB-C cable. The panel does not need to be connected to flash, but nothing is harmed if it is.
+
+### 4. Upload the web page
+
+The settings page lives on the board's filesystem, separately from the firmware, so it has its own upload.
+
+- **VS Code:** PlatformIO sidebar -> Project Tasks -> uptick -> Platform -> **Upload Filesystem Image**
+- **Command line**, from the `uptick` folder:
+
+```bash
+pio run -t uploadfs
+```
+
+### 5. Upload the firmware
+
+- **VS Code:** PlatformIO sidebar -> Project Tasks -> uptick -> General -> **Upload**
+- **Command line:**
+
+```bash
+pio run -t upload
+```
+
+The first build downloads the ESP32 toolchain and libraries, which takes a few minutes. Later builds take seconds. When the upload finishes, the board restarts and the panel shows the uptick splash with the firmware version.
+
+PlatformIO finds the board on its own. If more than one serial device is plugged in and it picks the wrong one, name the port: `pio run -t upload --upload-port COM5` on Windows, `/dev/ttyACM0` on Linux, `/dev/cu.usbmodem*` on macOS. The same goes for `uploadfs`.
+
+### 6. Connect it to WiFi
+
+1. With no WiFi stored, the board starts its own network called `Uptick-XXXX`. Join it from a phone or laptop.
+2. The setup page should open by itself. If it does not, browse to `192.168.4.1`.
+3. Pick your network, enter the password and save. The board restarts and joins it.
+4. For eight seconds after joining, the panel shows the network name, its IP address and `uptick.local`.
+
+From then on the settings page is at **http://uptick.local** (or the IP address, if your device does not support `.local` names). The Tickers tab is where feeds are added; Display has the layout, brightness and theme; Settings has WiFi, data sources, colors and firmware updates.
+
+To start over, use Forget WiFi on the Settings tab, or erase the board completely with `pio run -t erase` and flash again from step 4.
+
+### If the upload cannot connect
+
+- **No port appears:** try another cable - many USB-C cables are charge-only - and another USB port.
+- **"Access denied" or "port busy":** something else has the port open, usually a serial monitor. Close it.
+- **"No serial data received", "Write timeout", or the board seems dead:** put it into its bootloader by hand. Hold the **BOOT** button, tap **RESET**, release **BOOT**, then upload again. When the upload finishes, press **RESET** - the board cannot restart itself from this mode.
+
+### Updating later
+
+- **Firmware only** (most updates): `pio run` builds it, and Settings -> Maintenance -> Firmware takes the file from `.pio/build/uptick/firmware.bin` and installs it over WiFi. `pio run -t upload` over USB works too. Either way your settings are kept.
+- **When the web page changes** (anything under `data/`): `uploadfs` rewrites the whole filesystem, and **that erases your saved settings** - feeds, layout and colors. WiFi and the CoinGecko key are stored elsewhere and survive. Back the settings up first and restore them after:
+
+```bash
+curl -o uptick-config.json http://uptick.local/api/config
+```
+
+```bash
+curl -H "Content-Type: application/json" --data-binary @uptick-config.json http://uptick.local/api/config
+```
+
+Export and Import on the Tickers tab do the same for just the feed list.
+
+### Other boards
+
+Only the Matrix Portal S3 is supported as it stands. Another ESP32-S3 board with 8 MB of flash should work after editing the pins in `include/pins.h`. Classic ESP32 boards need a separate build setup that does not exist yet - see [Status](#status).
+
+## Using it
+
+Open **http://uptick.local** in a browser on the same network. The page has three tabs: **Tickers**, **Display** and **Settings**.
+
+Brightness, layout, theme, scroll speed and colors change on the panel the moment you touch them, so you can judge them before keeping them. Nothing is kept until you press **Save** - a bar that appears at the bottom of the page whenever there are unsaved changes, on any tab, and saves all of them. Restarting without saving brings back what was saved.
+
+### Adding tickers
+
+On the **Tickers** tab:
+
+1. Press **+ Add Ticker**. The new row takes the source of the row above it.
+2. Pick a **Source** and type the **Symbol** the way that source names it:
+
+| Source | What it covers | Symbol | Examples |
+| --- | --- | --- | --- |
+| binance | crypto | the trading pair | `BTCUSDT`, `ETHUSDT`, `SOLUSDT` |
+| coinbase | crypto | the product id | `BTC-USD`, `ETH-USD` |
+| coingecko | crypto, including coins Binance does not list | the coin id from its CoinGecko page address | `bitcoin`, `ethereum` |
+| yahoo | stocks, ETFs, indices, futures, currencies | the ticker as Yahoo Finance shows it | `AAPL`, `SPY`, `^GSPC`, `GC=F` (gold), `EURUSD=X`, `SAP.DE` |
+
+   CoinGecko needs a free demo API key, entered under Settings -> Market data. The other three need nothing.
+3. Press **check** to confirm the symbol exists and see its current price.
+4. **Label** is what the panel shows. Leave it blank and it is made from the symbol, with a dollar quote dropped - `BTCUSDT` shows as `BTC`.
+5. **Chart candle** sets how far back the chart reaches - the chart is 64 candles wide, and each choice in the list shows the span it gives for that source. **Decimals** at 0 picks sensibly from the price.
+6. Press **Save**. Every new symbol is checked against its source first, and an unknown one stops the save rather than showing up as a feed that never loads.
+
+Drag a row by its grip, or use the arrows, to change the order; **x** removes it. In the horizontal ticker the first half of the list runs along the top and the second half along the bottom, so the order also decides the row.
+
+**Export** saves the feed list to a file and **Import** loads one back - worth doing before reflashing the web page, which erases saved settings.
+
+### Choosing a layout
+
+On the **Display** tab:
+
+- **Brightness** - the panel is bright; a few percent is plenty indoors.
+- **Mode:**
+  - **single + chart** - one feed at a time with its chart, changing every **Seconds per feed**.
+  - **ticker - horizontal scroll** - two rows of feeds crawling across the panel, at **Scroll speed**.
+  - **ticker - vertical scroll** - the list rolling upward like a departure board. **Pause at each entry** holds each one for a moment.
+- **Theme** - **christmas - falling snow** adds snow, a snowman or tree on the chart, and Santa now and then. **send Santa now** calls him over straight away.
+- **rotate 180 degrees** - for a panel mounted upside down.
+
+### Reading the panel
+
+- The label is top left and the change is top right, with an up or down triangle, green for up and red for down. For stocks the change is against the previous close; for crypto it is the last 24 hours.
+- The price is underneath. On the chart screen the chart is colored by its own direction, so a coin up on the day can still show a red chart if its chart span is falling.
+- Stocks on the chart screen carry a small icon at the end of the price line: a rising **sun** for pre-market prices, a **moon** for after hours, and a **padlock** when the market is closed. No icon means the market is open and the price is live.
+- A label in **orange** means that feed could not be refreshed and the price shown is old.
+
+### Settings
+
+- **WiFi** - power save (off is steadier), and **Forget WiFi**, which restarts the board into setup mode.
+- **Market data** - **Price poll** is how often prices are fetched. **Pause fetching** stops all fetching until a restart. The **CoinGecko API key** is stored on the board and never sent back to the page.
+- **Palette** - every color on the panel, changed live and kept by Save. **reset to factory** brings back the defaults.
+- **Maintenance** - install a firmware file over WiFi (see [Updating later](#updating-later)), and **Restore default settings**, which resets feeds, layout and colors but keeps WiFi.
 
 ## Hardware
 
@@ -29,7 +182,7 @@ The panel is 2048 LEDs. Full white is roughly 3-4 A; a ticker screen is mostly d
 
 Pin assignments live in `include/pins.h`, taken from the block Adafruit_Protomatter selects under `ARDUINO_ADAFRUIT_MATRIXPORTAL_ESP32S3` - the pins are the board's, so they carried over unchanged to the DMA driver.
 
-## Build
+## Developer notes
 
 ```bash
 pio run -t upload
@@ -51,16 +204,7 @@ pio device monitor
 
 Note the monitor holds the port - close it before uploading or the flash fails with a permission error.
 
-## First run
-
-1. Flash firmware and filesystem, then power up.
-2. With no stored credentials the device starts a setup AP called `Uptick-XXXX` and runs a captive portal. Join it; the config page should pop automatically, or browse to `192.168.4.1`.
-3. Pick your network, enter the password, save. The device restarts and joins.
-4. The panel shows the SSID, IP and `uptick.local` for eight seconds after joining, so the address is always recoverable without a serial cable.
-
 Every boot opens on a splash: the wordmark from the web page, "up" in white and "tick" in green, with the firmware version in the bottom-right corner. It stays up for at least 5 seconds, counted from when the panel starts, so a slow WiFi join leaves it up no longer than the join takes. Its colours are fixed rather than taken from the palette, so tuning the palette never changes the logo.
-
-To start over, use Forget WiFi on the config page, or erase NVS with `pio run -t erase`.
 
 ## Configuration
 
@@ -274,7 +418,7 @@ Two tapes crawling right to left, the way an exchange board or a business channe
 ```
 rows  0-15   BTC ▲1.73%   ETH ▼2.52%   SOL ▼2.2      first half of the feeds
              84,434       2,676        114.78
-rows 16-31   TSLA ▲0.44%  SPCX ▼1.58%  EOSE ▲        second half
+rows 16-31   TSLA ▲0.44%  AAPL ▼1.58%  MSFT ▲        second half
              380.56       152.27       3.685
 ```
 
@@ -431,7 +575,7 @@ It is RF, not bus contention. Changing edge speed at a fixed clock changed the r
 
 ## Status
 
-Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, two-section scrolling ticker, tabbed web UI, Binance / Coinbase / CoinGecko / Yahoo adapters with batch fetching, symbol checks on save, up to 32 feeds, feed reordering and export/import.
+Working: provisioning, captive portal, web config, live palette tuning, OTA, flicker-free DMA rendering with hardware brightness, chart and both scrolling tickers, tabbed web UI, Binance / Coinbase / CoinGecko / Yahoo adapters with batch fetching, pre-market and after-hours prices with market-state icons, symbol checks on save, up to 32 feeds, feed reordering and export/import, and the Christmas theme.
 
 Ideas, roughly in order of value:
 
