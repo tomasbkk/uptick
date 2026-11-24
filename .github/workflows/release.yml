@@ -1,0 +1,112 @@
+# Builds the firmware and the web page's filesystem image, and publishes them
+# as a GitHub release.
+#
+# Push a tag named after the version in include/uptick.h to make a release:
+#
+#   git tag v0.31.0
+#   git push origin v0.31.0
+#
+# Running it by hand from the Actions tab builds the same files and keeps them
+# as a workflow artifact, without making a release.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio esptool==4.8.1
+
+      - name: Read the version
+        id: ver
+        run: |
+          VER=$(sed -n 's/^#define UPTICK_VERSION *"\(.*\)"/\1/p' include/uptick.h)
+          [ -n "$VER" ] || { echo "UPTICK_VERSION not found in include/uptick.h"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$VER" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match UPTICK_VERSION $VER - bump the version or retag"
+            exit 1
+          fi
+
+      - name: Build the firmware
+        run: pio run -e uptick
+
+      - name: Build the web page's filesystem
+        run: pio run -e uptick -t buildfs
+
+      - name: Put the release files together
+        run: |
+          VER=${{ steps.ver.outputs.version }}
+          B=.pio/build/uptick
+          BOOT_APP0=$(find ~/.platformio/packages -path '*tools/partitions/boot_app0.bin' | head -1)
+          [ -n "$BOOT_APP0" ] || { echo "boot_app0.bin not found"; exit 1; }
+          # The filesystem's offset comes from the partition table, so the two cannot drift.
+          FS_OFFSET=$(awk -F, '$1 ~ /^spiffs/ { gsub(/ /, "", $4); print $4 }' partitions_8mb_ota.csv)
+          [ -n "$FS_OFFSET" ] || { echo "spiffs partition not found"; exit 1; }
+          mkdir -p dist
+          cp "$B/firmware.bin" "dist/uptick-$VER-firmware.bin"
+          cp "$B/littlefs.bin" "dist/uptick-$VER-littlefs.bin"
+          esptool.py --chip esp32s3 merge_bin -o "dist/uptick-$VER-full.bin" \
+            --flash_mode keep --flash_freq keep --flash_size 8MB \
+            0x0 "$B/bootloader.bin" \
+            0x8000 "$B/partitions.bin" \
+            0xe000 "$BOOT_APP0" \
+            0x10000 "$B/firmware.bin" \
+            "$FS_OFFSET" "$B/littlefs.bin"
+          (cd dist && sha256sum *.bin > SHA256SUMS.txt)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uptick-${{ steps.ver.outputs.version }}
+          path: dist/
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=${{ steps.ver.outputs.version }}
+          cat > notes.md <<EOF
+          ## Files
+
+          | File | What it is for |
+          | --- | --- |
+          | \`uptick-$VER-full.bin\` | A first install: bootloader, firmware and web page in one image, flashed at \`0x0\`. It erases everything on the board, settings and WiFi included. |
+          | \`uptick-$VER-firmware.bin\` | Updating a board that already runs uptick: upload it on the web page under **Settings > Maintenance > Firmware**. Settings are kept. |
+          | \`uptick-$VER-littlefs.bin\` | The web page on its own, for when it changed. Writing it erases the saved settings, so back them up first - see [Updating later](https://github.com/${{ github.repository }}#updating-later). |
+
+          To flash the full image over USB:
+
+          \`\`\`
+          pip install esptool
+          esptool.py --chip esp32s3 write_flash 0x0 uptick-$VER-full.bin
+          \`\`\`
+
+          or in the browser with [ESP Tool](https://espressif.github.io/esptool-js/) - connect, set the address to \`0x0\`, pick the file and press Program. Then join the \`Uptick-XXXX\` WiFi network it starts, and pick your own network on the page that opens.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "uptick $VER" \
+            --notes-file notes.md \
+            --generate-notes

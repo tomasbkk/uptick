@@ -44,6 +44,21 @@ LED panels photograph badly, so these are frames taken from the device itself wi
 
 ## Flashing
 
+### The quick way: a release
+
+Each [release](https://github.com/tomasbkk/uptick/releases) has the firmware and web page built and merged into one image, `uptick-<version>-full.bin`. Flash it at `0x0`, either in the browser with [ESP Tool](https://espressif.github.io/esptool-js/) (Chrome or Edge: connect, set the address to `0x0`, pick the file, press Program) or with esptool:
+
+```bash
+pip install esptool
+esptool.py --chip esp32s3 write_flash 0x0 uptick-0.31.0-full.bin
+```
+
+That replaces everything on the board, so it is for a first install. Then carry on at [6. Connect it to WiFi](#6-connect-it-to-wifi). Later updates use the release's `uptick-<version>-firmware.bin` on the web page instead - see [Updating later](#updating-later).
+
+If the board is not found, hold **BOOT**, tap **RESET** and let go of BOOT, then try again. To build it yourself instead, follow the steps below.
+
+Releases are made by [.github/workflows/release.yml](.github/workflows/release.yml) whenever a tag named after the version is pushed: bump `UPTICK_VERSION` in `include/uptick.h`, commit, then `git tag v<version>` and `git push origin v<version>`. The workflow refuses a tag that does not match the version.
+
 ### 1. Install the tools
 
 Either of these works:
@@ -108,7 +123,7 @@ To start over, use Forget WiFi on the Settings tab, or erase the board completel
 
 ### Updating later
 
-- **Firmware only** (most updates): `pio run` builds it, and Settings -> Maintenance -> Firmware takes the file from `.pio/build/uptick/firmware.bin` and installs it over WiFi. `pio run -t upload` over USB works too. Either way your settings are kept.
+- **Firmware only** (most updates): Settings -> Maintenance -> Firmware installs a firmware file over WiFi - either `uptick-<version>-firmware.bin` from a [release](https://github.com/tomasbkk/uptick/releases), or your own build from `.pio/build/uptick/firmware.bin` after `pio run`. `pio run -t upload` over USB works too. Either way your settings are kept.
 - **When the web page changes** (anything under `data/`): `uploadfs` rewrites the whole filesystem, and **that erases your saved settings** - feeds, layout and colors. WiFi and the CoinGecko key are stored elsewhere and survive. Back the settings up first and restore them after:
 
 ```bash
