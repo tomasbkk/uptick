@@ -11,6 +11,29 @@ A desk ticker for crypto and stock prices on a 64x32 RGB LED panel, driven by an
 - **Mix and match:** tickers, weather and clock in rotation, or any one on its own
 - **Christmas theme:** falling snow that settles on the chart, a snowman or a tree, and Santa flying past now and then
 
+## What it looks like
+
+<table>
+<tr>
+<td align="center"><img src="docs/images/chart.png" width="400" alt="One feed with its price chart"><br>One feed at a time, with its chart</td>
+<td align="center"><img src="docs/images/chart-snow.png" width="400" alt="The chart with the Christmas theme"><br>The Christmas theme: snow settling on the chart, and a tree</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/images/ticker.png" width="400" alt="The horizontal ticker"><br>Two-row horizontal ticker, scrolling left</td>
+<td align="center"><img src="docs/images/ticker-vertical.png" width="400" alt="The vertical ticker"><br>Vertical ticker, scrolling up</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/images/weather-now.png" width="400" alt="Current weather"><br>Weather now, with an animated icon</td>
+<td align="center"><img src="docs/images/weather-week.png" width="400" alt="The 5-day forecast"><br>The 5-day forecast</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/images/clock-matrix.png" width="400" alt="The matrix clock"><br>Clock: matrix</td>
+<td align="center"><img src="docs/images/clock-platformer.png" width="400" alt="The platformer clock"><br>Clock: platformer</td>
+</tr>
+</table>
+
+LED panels photograph badly, so these are frames taken from the device itself with [`tools/screenshot.py`](tools/screenshot.py) and drawn as LEDs: the colors are the ones the firmware draws, which is close to how the panel looks to the eye. All nine clock themes are under [Adding the clock](#adding-the-clock).
+
 ## What you need
 
 - [Adafruit Matrix Portal S3](https://www.adafruit.com/product/5778) - the firmware's pins and memory layout are this board's
@@ -165,6 +188,24 @@ The clock shows the time and the date in 24-hour time, in a choice of themes. Ch
 | platformer | a side-scroller: a plumber hits "?" boxes for mushrooms to grow, then stomps turtles - or gets caught by one and goes small |
 | snake | a snake chases tiny mushrooms around the digits, growing as it eats, until it hits a digit or itself |
 
+<table>
+<tr>
+<td align="center"><img src="docs/images/clock-matrix.png" width="260" alt="matrix"><br>matrix</td>
+<td align="center"><img src="docs/images/clock-flip.png" width="260" alt="flip"><br>flip</td>
+<td align="center"><img src="docs/images/clock-retro.png" width="260" alt="retro"><br>retro</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/images/clock-pong.png" width="260" alt="pong"><br>pong</td>
+<td align="center"><img src="docs/images/clock-tetris.png" width="260" alt="tetris"><br>tetris</td>
+<td align="center"><img src="docs/images/clock-sky.png" width="260" alt="sky"><br>sky, in the morning</td>
+</tr>
+<tr>
+<td align="center"><img src="docs/images/clock-analog.png" width="260" alt="analog"><br>analog</td>
+<td align="center"><img src="docs/images/clock-platformer.png" width="260" alt="platformer"><br>platformer</td>
+<td align="center"><img src="docs/images/clock-snake.png" width="260" alt="snake"><br>snake</td>
+</tr>
+</table>
+
 With no city the clock shows UTC and says so.
 
 ### Choosing a layout
@@ -242,6 +283,15 @@ pio device monitor
 ```
 
 Note the monitor holds the port - close it before uploading or the flash fails with a permission error.
+
+### Screenshots
+
+```bash
+pip install pillow
+python tools/screenshot.py -o screen.png
+```
+
+saves what the panel is showing right now as a picture of LEDs; `--host` takes an IP address when `uptick.local` does not resolve, and `--pitch` sets the size of each LED in pixels (10 by default). The driver cannot read pixels back - its DMA buffers hold bit-planes, not colors - so the firmware keeps a plain copy of each frame as it is drawn: the panel object is a small subclass of the driver's that writes every `drawPixel`, line, rectangle and `fillScreen` into a 64x32 RGB565 array as well, and `flip()` copies that array out for `/api/screen`. Every frame starts from a cleared screen, so the copy is always a whole frame. The colors are as drawn, before gamma and brightness, which is why the pictures look the way the panel looks to the eye. The live endpoints - `/api/mode`, `/api/show`, `/api/theme`, `/api/clocktheme` - are the easy way to put a given screen up before taking one.
 
 Every boot opens on a splash: the wordmark from the web page, "up" in white and "tick" in green, with the firmware version in the bottom-right corner. It stays up for at least 5 seconds, counted from when the panel starts, so a slow WiFi join leaves it up no longer than the join takes. Its colours are fixed rather than taken from the palette, so tuning the palette never changes the logo.
 
@@ -329,6 +379,7 @@ Power save used to be applied only when WiFi joined, so saving a change to it di
 | POST | `/api/clocktheme` | live clock theme, not persisted - the same arrangement as the mode |
 | POST | `/api/show` | live `{"tickers":bool, "weather":bool, "clock":bool}`, not persisted - the same arrangement as the mode; all three off is refused |
 | GET | `/api/weather` | the weather the device last fetched, per city |
+| GET | `/api/screen` | the frame on the panel: 64x32 RGB565 pixels, little-endian, row by row, 4096 bytes - see [Screenshots](#screenshots) |
 | GET / POST | `/api/palette` | live colour overrides by name, not persisted - the config's `palette` is what persists |
 | POST | `/api/defaults` | restore factory settings and colours, leaving WiFi alone |
 | POST | `/api/apikey` | store the CoinGecko key (write-only) |

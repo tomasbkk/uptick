@@ -10,7 +10,76 @@
 // descriptors that the LCD peripheral walks forever. No interrupt fires
 // between bit-planes and no CPU is involved in refresh at all, so nothing the
 // firmware does - TLS, WiFi, flash writes - can make the panel flicker.
-static MatrixPanel_I2S_DMA* matrix = nullptr;
+//
+// The driver cannot read pixels back - the DMA buffers hold bit-planes, not
+// colors - so this keeps a plain copy of whatever is drawn, for /api/screen.
+// Every frame starts from a cleared screen, so the copy is always a whole
+// frame. It is the 565 color as drawn, before gamma and brightness.
+class CaptureMatrix : public MatrixPanel_I2S_DMA
+{
+public:
+  using MatrixPanel_I2S_DMA::MatrixPanel_I2S_DMA;
+  using MatrixPanel_I2S_DMA::drawPixel;
+  using MatrixPanel_I2S_DMA::drawFastVLine;
+  using MatrixPanel_I2S_DMA::drawFastHLine;
+  using MatrixPanel_I2S_DMA::fillRect;
+
+  uint16_t drawn[PANEL_W * PANEL_H] = {};   // the frame being drawn
+
+  void drawPixel(int16_t x, int16_t y, uint16_t c) override
+  {
+    if (x >= 0 && x < PANEL_W && y >= 0 && y < PANEL_H) drawn[y * PANEL_W + x] = c;
+    MatrixPanel_I2S_DMA::drawPixel(x, y, c);
+  }
+
+  void fillScreen(uint16_t c) override
+  {
+    for (uint16_t i = 0; i < PANEL_W * PANEL_H; i++) drawn[i] = c;
+    MatrixPanel_I2S_DMA::fillScreen(c);
+  }
+
+  void drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t c) override
+  {
+    keep(x, y, 1, h, c);
+    MatrixPanel_I2S_DMA::drawFastVLine(x, y, h, c);
+  }
+
+  void drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t c) override
+  {
+    keep(x, y, w, 1, c);
+    MatrixPanel_I2S_DMA::drawFastHLine(x, y, w, c);
+  }
+
+  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t c) override
+  {
+    keep(x, y, w, h, c);
+    MatrixPanel_I2S_DMA::fillRect(x, y, w, h, c);
+  }
+
+private:
+  void keep(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t c)
+  {
+    for (int16_t j = y; j < y + h; j++)
+    {
+      if (j < 0 || j >= PANEL_H) continue;
+      for (int16_t i = x; i < x + w; i++)
+        if (i >= 0 && i < PANEL_W) drawn[j * PANEL_W + i] = c;
+    }
+  }
+};
+
+static CaptureMatrix* matrix = nullptr;
+
+// The last frame sent to the panel, copied out of matrix->drawn at each flip.
+static uint16_t     s_shown[PANEL_W * PANEL_H] = {};
+static portMUX_TYPE s_shownMux = portMUX_INITIALIZER_UNLOCKED;
+
+void displayScreen(uint16_t* out)
+{
+  portENTER_CRITICAL(&s_shownMux);
+  memcpy(out, s_shown, sizeof(s_shown));
+  portEXIT_CRITICAL(&s_shownMux);
+}
 
 static bool              s_ok         = false;
 static SemaphoreHandle_t s_panelMutex = nullptr;
@@ -130,6 +199,10 @@ static void flip()
 {
   matrix->flipDMABuffer();
   s_lastFlipUs = micros();
+
+  portENTER_CRITICAL(&s_shownMux);
+  memcpy(s_shown, matrix->drawn, sizeof(s_shown));
+  portEXIT_CRITICAL(&s_shownMux);
 }
 
 static void waitForFlip()
@@ -3283,7 +3356,7 @@ bool displayBegin()
   mx.i2sspeed    = (HUB75_I2S_CFG::clk_speed)HUB75_CLOCK_HZ;
   mx.setPixelColorDepthBits(PANEL_BIT_DEPTH);
 
-  matrix = new MatrixPanel_I2S_DMA(mx);
+  matrix = new CaptureMatrix(mx);
   if (!matrix)
   {
     Serial.println("[panel] allocation failed");

@@ -3,7 +3,7 @@
 #include <time.h>
 
 #define UPTICK_NAME      "uptick"
-#define UPTICK_VERSION   "0.30.1"
+#define UPTICK_VERSION   "0.31.0"
 #define UPTICK_SCHEMA    1
 #define UPTICK_MAX_FEEDS 32
 #define UPTICK_MAX_CITIES 8
@@ -245,6 +245,10 @@ const char* displayClockThemeName(uint8_t i);
 // Sends Santa across the panel on the next frame, if the snow theme is on.
 // Otherwise he flies whenever it next is, a few minutes after it comes on.
 void displaySantaNow();
+
+// Copies the frame last sent to the panel into out, PANEL_W * PANEL_H RGB565
+// pixels row by row, for /api/screen.
+void displayScreen(uint16_t* out);
 
 void displayPause();
 void displayResume();

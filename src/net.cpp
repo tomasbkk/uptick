@@ -238,6 +238,20 @@ static void handleShow()
   sendOk();
 }
 
+// The frame on the panel right now: 64x32 RGB565 pixels, little-endian, row
+// by row - 4096 bytes. Colors are as drawn, before gamma and brightness, so a
+// render of it looks the way the panel looks to the eye rather than to a
+// camera. tools/screenshot.py turns it into a picture.
+static void handleScreen()
+{
+  static uint16_t px[64 * 32];
+  displayScreen(px);
+  http.sendHeader("Cache-Control", "no-store");
+  http.setContentLength(sizeof(px));
+  http.send(200, "application/octet-stream", "");
+  http.sendContent((const char*)px, sizeof(px));
+}
+
 // The weather as the device last fetched it, one entry per configured city,
 // so the web page can show what the panel is working from.
 static void handleWeather()
@@ -773,6 +787,7 @@ void netBegin()
   http.on("/api/show",       HTTP_POST, handleShow);
   http.on("/api/clocktheme", HTTP_POST, handleClockTheme);
   http.on("/api/weather",    HTTP_GET,  handleWeather);
+  http.on("/api/screen",     HTTP_GET,  handleScreen);
   http.on("/api/defaults",   HTTP_POST, handleDefaults);
   http.on("/api/apikey",     HTTP_POST, handleApiKey);
   http.on("/api/fetch",      HTTP_POST, handleFetch);
